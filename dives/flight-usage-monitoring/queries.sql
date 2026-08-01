@@ -20,6 +20,8 @@ SELECT flight_id, flight_name, schedule_cron, schedule_status,
        status, current_version, created_at, updated_at
 FROM MD_LIST_FLIGHTS()
 ORDER BY flight_name;
+-- created_at vs updated_at is worth a glance: a Flight whose updated_at never
+-- moves is one nobody is deploying any more.
 
 
 -- 2. Generate the run-health query -------------------------------------------
@@ -95,7 +97,12 @@ WHERE user_agent LIKE '%md-flights%'
 --
 --   round(100.0 * count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED') / count(*), 1) AS success_pct,
 --   round(avg(epoch(ended_at - started_at))
---         FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1)                            AS avg_secs
+--         FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1)                            AS avg_secs,
+--   round(sum(epoch(ended_at - started_at))
+--         FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1)                            AS total_secs
+--
+-- total_secs is the one to watch for cost: a fast Flight that runs constantly
+-- can burn more compute than a slow one that runs nightly.
 --
 -- Add both to the SELECT in query 3 (or to the generated query from query 2).
 

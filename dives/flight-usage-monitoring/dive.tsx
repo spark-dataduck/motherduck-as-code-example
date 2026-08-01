@@ -35,6 +35,10 @@ const N = (v: unknown): number => (v != null ? Number(v) : 0);
 const S = (v: unknown): string => (v != null ? String(v) : "");
 
 // Anything interpolated into SQL must be a UUID and nothing else.
+// Durations get long here — document-parse totals over two hours.
+const fmtDur = (s: number) =>
+  !s ? "—" : s >= 3600 ? (s / 3600).toFixed(1) + "h" : s >= 60 ? (s / 60).toFixed(1) + "m" : s.toFixed(0) + "s";
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function Skel({ h, w }: { h: number; w?: string }) {
@@ -78,11 +82,12 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
       <table className="w-full" style={{ color: C.text, fontSize: 13, borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-            {cols.map((c: any) => (
+            {cols.map((c: any, i: number) => (
               <th key={c.key} onClick={() => onSort(c.key)} title="Sort by this column"
-                  className={"py-2 pr-3 select-none " + (c.num ? "text-right" : "text-left")}
+                  className={"py-2.5 select-none " + (c.num || c.ts ? "text-right" : "text-left")}
                   style={{ color: sortKey === c.key ? C.blue : C.muted, fontSize: 11, fontWeight: 500,
-                           textTransform: "uppercase", letterSpacing: "0.3px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                           textTransform: "uppercase", letterSpacing: "0.3px", cursor: "pointer",
+                           whiteSpace: "nowrap", paddingRight: i === cols.length - 1 ? 0 : 28 }}>
                 {c.label}{sortKey === c.key ? (dir === "asc" ? " ↑" : " ↓") : ""}
               </th>
             ))}
@@ -91,9 +96,10 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
         <tbody>
           {sorted.map((r: any, i: number) => (
             <tr key={i} style={{ borderBottom: "1px solid #f1f3f4" }} className="hover:bg-gray-50">
-              {cols.map((c: any) => (
-                <td key={c.key} className={"py-2 pr-3 " + (c.num ? "text-right tabular-nums" : "text-left")}
-                    style={{ whiteSpace: "nowrap", color: c.tone ? c.tone(r[c.key]) : undefined }}>
+              {cols.map((c: any, i: number) => (
+                <td key={c.key} className={"py-2.5 " + (c.num || c.ts ? "text-right tabular-nums" : "text-left")}
+                    style={{ whiteSpace: "nowrap", color: c.tone ? c.tone(r[c.key]) : undefined,
+                             paddingRight: i === cols.length - 1 ? 0 : 28 }}>
                   {c.render ? c.render(r) : r[c.key]}
                 </td>
               ))}
@@ -132,6 +138,7 @@ export default function FlightUsageMonitoring() {
   const inventory = useSQLQuery(`
     SELECT flight_id, flight_name, schedule_cron, schedule_status,
            status, current_version,
+           strftime(created_at, '%Y-%m-%d %H:%M') AS created_at,
            strftime(updated_at, '%Y-%m-%d %H:%M') AS updated_at
     FROM MD_LIST_FLIGHTS()
     ORDER BY flight_name
@@ -153,6 +160,7 @@ export default function FlightUsageMonitoring() {
                             AND created_at >= now() - INTERVAL ${w} DAY) AS recent_failures,
            round(100.0 * count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED') / count(*), 1) AS success_pct,
            round(avg(epoch(ended_at - started_at)) FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1) AS avg_secs,
+           round(sum(epoch(ended_at - started_at)) FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1) AS total_secs,
            strftime(max(created_at), '%Y-%m-%d %H:%M')                   AS last_run,
            strftime(max(created_at) FILTER (status = 'RUN_STATUS_SUCCEEDED'), '%Y-%m-%d %H:%M') AS last_success,
            strftime(max(created_at) FILTER (status = 'RUN_STATUS_FAILED'), '%Y-%m-%d %H:%M')    AS last_failure
@@ -215,14 +223,15 @@ export default function FlightUsageMonitoring() {
               tone: (v: any) => (N(v) < 90 ? C.red : undefined) },
             { key: "recent_failures", label: `Fail ${win}d`, num: true,
               tone: (v: any) => (N(v) > 0 ? C.red : undefined) },
-            { key: "avg_secs",        label: "Avg run", num: true, render: (r: any) => (r.avg_secs ? `${r.avg_secs.toFixed(0)}s` : "—") },
-            { key: "last_run",        label: "Last run" },
-            { key: "last_success",    label: "Last success", render: (r: any) => r.last_success || "—" },
-            { key: "last_failure",    label: "Last failure", render: (r: any) => r.last_failure || "—" },
+            { key: "avg_secs",        label: "Avg run", num: true, render: (r: any) => fmtDur(r.avg_secs) },
+            { key: "total_secs",      label: "Total run", num: true, render: (r: any) => fmtDur(r.total_secs) },
+            { key: "last_run",        label: "Last run", ts: true },
+            { key: "last_success",    label: "Last success", ts: true, render: (r: any) => r.last_success || "—" },
+            { key: "last_failure",    label: "Last failure", ts: true, render: (r: any) => r.last_failure || "—" },
           ]}
           rows={runRows.map((r) => ({
             flight_name: S(r.flight_name), total_runs: N(r.total_runs), success_pct: N(r.success_pct),
-            recent_failures: N(r.recent_failures), avg_secs: N(r.avg_secs),
+            recent_failures: N(r.recent_failures), avg_secs: N(r.avg_secs), total_secs: N(r.total_secs),
             last_run: S(r.last_run), last_success: S(r.last_success), last_failure: S(r.last_failure),
           }))}
           loading={runsLoading}
@@ -246,12 +255,14 @@ export default function FlightUsageMonitoring() {
               render: (r: any) => <Pill text={r.status.replace("JOB_STATUS_", "").toLowerCase()}
                                         tone={r.status.includes("ACTIVE") ? "ok" : "off"} /> },
             { key: "current_version", label: "Version", num: true },
-            { key: "updated_at",      label: "Updated" },
+            { key: "created_at",      label: "Created", ts: true },
+            { key: "updated_at",      label: "Updated", ts: true },
           ]}
           rows={flights.map((f) => ({
             flight_name: S(f.flight_name), schedule_cron: S(f.schedule_cron),
             schedule_status: S(f.schedule_status), status: S(f.status),
-            current_version: N(f.current_version), updated_at: S(f.updated_at),
+            current_version: N(f.current_version),
+            created_at: S(f.created_at), updated_at: S(f.updated_at),
           }))}
           loading={inventory.isLoading}
           sortKey={invSort} dir={invDir}

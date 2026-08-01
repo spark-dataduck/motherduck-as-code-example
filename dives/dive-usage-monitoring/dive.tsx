@@ -79,11 +79,12 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
       <table className="w-full" style={{ color: C.text, fontSize: 13, borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-            {cols.map((c: any) => (
+            {cols.map((c: any, i: number) => (
               <th key={c.key} onClick={() => onSort(c.key)} title="Sort by this column"
-                  className={"py-2 pr-3 select-none " + (c.num ? "text-right" : "text-left")}
+                  className={"py-2.5 select-none " + (c.num || c.ts ? "text-right" : "text-left")}
                   style={{ color: sortKey === c.key ? C.blue : C.muted, fontSize: 11, fontWeight: 500,
-                           textTransform: "uppercase", letterSpacing: "0.3px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                           textTransform: "uppercase", letterSpacing: "0.3px", cursor: "pointer",
+                           whiteSpace: "nowrap", paddingRight: i === cols.length - 1 ? 0 : 28 }}>
                 {c.label}{sortKey === c.key ? (dir === "asc" ? " ↑" : " ↓") : ""}
               </th>
             ))}
@@ -92,9 +93,9 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
         <tbody>
           {sorted.map((r: any, i: number) => (
             <tr key={i} style={{ borderBottom: "1px solid #f1f3f4" }} className="hover:bg-gray-50">
-              {cols.map((c: any) => (
-                <td key={c.key} className={"py-2 pr-3 " + (c.num ? "text-right tabular-nums" : "text-left")}
-                    style={{ whiteSpace: "nowrap" }}>
+              {cols.map((c: any, i: number) => (
+                <td key={c.key} className={"py-2.5 " + (c.num || c.ts ? "text-right tabular-nums" : "text-left")}
+                    style={{ whiteSpace: "nowrap", paddingRight: i === cols.length - 1 ? 0 : 28 }}>
                   {c.fmt ? c.fmt(r[c.key]) : r[c.key]}
                 </td>
               ))}
@@ -196,10 +197,11 @@ export default function DiveUsageMonitoring() {
         AND start_time > now() - INTERVAL ${d} DAY
     ),
     dive_names AS (
-      SELECT id::VARCHAR AS dive_id, title AS dive_name
+      SELECT id::VARCHAR AS dive_id, title AS dive_name, owner_name
       FROM MD_LIST_DIVES(include_org_shares := true)
     )
     SELECT coalesce(n.dive_name, '(deleted or not visible to me)') AS dive_name,
+           coalesce(n.owner_name, '—')                             AS owner_name,
            q.surface,
            count(DISTINCT q.user_name)            AS viewers,
            count(*)                               AS queries,
@@ -272,15 +274,17 @@ export default function DiveUsageMonitoring() {
         <SortTable
           cols={[
             { key: "dive_name",   label: "Dive" },
+            { key: "owner_name",  label: "Owner" },
             { key: "surface",     label: "Surface" },
             { key: "viewers",     label: "Viewers", num: true },
             { key: "queries",     label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
             { key: "exec_s",      label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
-            { key: "last_active", label: "Last active" },
+            { key: "last_active", label: "Last active", ts: true },
           ]}
           rows={rowsOf(byDive.data).map((r) => ({
-            dive_name: S(r.dive_name), surface: S(r.surface), viewers: N(r.viewers),
-            queries: N(r.queries), exec_s: N(r.exec_s), last_active: S(r.last_active),
+            dive_name: S(r.dive_name), owner_name: S(r.owner_name), surface: S(r.surface),
+            viewers: N(r.viewers), queries: N(r.queries), exec_s: N(r.exec_s),
+            last_active: S(r.last_active),
           }))}
           loading={probe.isLoading || byDive.isLoading}
           sortKey={diveSort} dir={diveDir}

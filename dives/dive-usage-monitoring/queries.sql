@@ -53,11 +53,12 @@ WITH dive_queries AS (
     AND start_time > now() - INTERVAL 30 DAY
 ),
 dive_names AS (
-  SELECT id::VARCHAR AS dive_id, title AS dive_name
+  SELECT id::VARCHAR AS dive_id, title AS dive_name, owner_name
   FROM MD_LIST_DIVES(include_org_shares := true)
 )
 SELECT
   coalesce(n.dive_name, '(deleted or not visible to me)') AS dive_name,
+  coalesce(n.owner_name, '—')                             AS owner_name,
   q.surface,
   count(DISTINCT q.viewer_name)          AS viewers,
   count(*)                               AS queries,

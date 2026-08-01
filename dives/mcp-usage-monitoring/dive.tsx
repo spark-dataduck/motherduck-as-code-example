@@ -79,11 +79,12 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
       <table className="w-full" style={{ color: C.text, fontSize: 13, borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-            {cols.map((c: any) => (
+            {cols.map((c: any, i: number) => (
               <th key={c.key} onClick={() => onSort(c.key)} title="Sort by this column"
-                  className={"py-2 pr-3 select-none " + (c.num ? "text-right" : "text-left")}
+                  className={"py-2.5 select-none " + (c.num || c.ts ? "text-right" : "text-left")}
                   style={{ color: sortKey === c.key ? C.blue : C.muted, fontSize: 11, fontWeight: 500,
-                           textTransform: "uppercase", letterSpacing: "0.3px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                           textTransform: "uppercase", letterSpacing: "0.3px", cursor: "pointer",
+                           whiteSpace: "nowrap", paddingRight: i === cols.length - 1 ? 0 : 28 }}>
                 {c.label}{sortKey === c.key ? (dir === "asc" ? " ↑" : " ↓") : ""}
               </th>
             ))}
@@ -92,9 +93,10 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
         <tbody>
           {sorted.map((r: any, i: number) => (
             <tr key={i} style={{ borderBottom: "1px solid #f1f3f4" }} className="hover:bg-gray-50">
-              {cols.map((c: any) => (
-                <td key={c.key} className={"py-2 pr-3 " + (c.num ? "text-right tabular-nums" : "text-left")}
-                    style={{ whiteSpace: "nowrap", color: c.tone ? c.tone(r[c.key]) : undefined }}>
+              {cols.map((c: any, i: number) => (
+                <td key={c.key} className={"py-2.5 " + (c.num || c.ts ? "text-right tabular-nums" : "text-left")}
+                    style={{ whiteSpace: "nowrap", color: c.tone ? c.tone(r[c.key]) : undefined,
+                             paddingRight: i === cols.length - 1 ? 0 : 28 }}>
                   {c.fmt ? c.fmt(r[c.key]) : r[c.key]}
                 </td>
               ))}
@@ -262,7 +264,7 @@ export default function McpUsageMonitoring() {
             { key: "exec_s",      label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
             { key: "p95_s",       label: "p95", num: true, fmt: (v: any) => `${N(v).toFixed(2)}s` },
             { key: "errors",      label: "Errors", num: true, tone: (v: any) => (N(v) > 0 ? C.red : undefined) },
-            { key: "last_active", label: "Last active" },
+            { key: "last_active", label: "Last active", ts: true },
           ]}
           rows={rowsOf(byClient.data).map((r) => ({
             mcp_client: S(r.mcp_client) || "(unknown)", users: N(r.users), queries: N(r.queries),
@@ -282,7 +284,7 @@ export default function McpUsageMonitoring() {
             { key: "mcp_client",  label: "Client" },
             { key: "queries",     label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
             { key: "exec_s",      label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
-            { key: "last_active", label: "Last active" },
+            { key: "last_active", label: "Last active", ts: true },
           ]}
           rows={rowsOf(byUser.data).map((r) => ({
             user_name: S(r.user_name), mcp_client: S(r.mcp_client) || "(unknown)",
@@ -298,7 +300,7 @@ export default function McpUsageMonitoring() {
       <Card title="Daily volume" note="Built on a date spine, so a day with no traffic shows as 0 rather than disappearing.">
         <SortTable
           cols={[
-            { key: "day",     label: "Day" },
+            { key: "day",     label: "Day", ts: true },
             { key: "queries", label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
             { key: "exec_s",  label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
           ]}
