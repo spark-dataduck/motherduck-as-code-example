@@ -207,7 +207,7 @@ deploy_dives() {
 # --- guides -----------------------------------------------------------------
 deploy_guides() {
   local n; n=$(jq '.guides | length' "$MANIFEST")
-  local i title topic src desc id preamble
+  local i title topic src desc access id preamble current_access
   # external_id ties each published version back to a commit.
   local sha="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo local)}"
 
@@ -216,6 +216,7 @@ deploy_guides() {
     topic=$(jq -r ".guides[$i].topic"       "$MANIFEST")
     src=$(  jq -r ".guides[$i].source"      "$MANIFEST")
     desc=$( jq -r ".guides[$i].description" "$MANIFEST")
+    access=$(jq -r ".guides[$i].access // \"user\"" "$MANIFEST")
 
     id=$(lookup_guide "$title" "$topic"); require_single "$id" "$title"
     preamble="SET VARIABLE guide_content = (SELECT content FROM read_text('$src'));"
@@ -233,7 +234,7 @@ deploy_guides() {
           $topic_arg
           \"description\"    := '$desc',
           \"content\"        := getvariable('guide_content'),
-          \"access\"         := 'user',
+          \"access\"         := '$access',
           \"change_comment\" := 'deployed from $sha',
           \"external_id\"    := '$sha');" >/dev/null
     else
@@ -245,6 +246,15 @@ deploy_guides() {
           \"external_id\"    := '$sha');
         FROM MD_UPDATE_GUIDE_METADATA(\"id\" := '$id'::UUID,
           \"title\" := '$title', $topic_arg \"description\" := '$desc');" >/dev/null
+
+      # Visibility is declared in the manifest, so reconcile it on every run —
+      # otherwise a guide flipped to 'organization' in the UI would stay that
+      # way forever and the repository would stop being the source of truth.
+      current_access=$(sql1 "SELECT access FROM MD_LIST_GUIDES() WHERE id = '$id';")
+      if [[ "$current_access" != "$access" ]]; then
+        echo "  access: $current_access -> $access"
+        md -c "FROM MD_SET_GUIDE_ACCESS(id := '$id'::UUID, access := '$access');" >/dev/null
+      fi
     fi
   done
 }

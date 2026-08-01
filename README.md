@@ -54,6 +54,15 @@ Three rules shaped that layout:
 
 Topics nest with slashes (`agent-commerce/forecasting` lives inside `agent-commerce`), and filtering is prefix-based, so asking for `agent-commerce` also returns everything beneath it. Keep it shallow — a few well-named top-level topics with at most a level or two below beats a deep tree. Topics carry no identity: any number of guides can share one, and each guide is still addressed by its own UUID.
 
+**Visibility is declared, not assumed.** Every guide carries `"access": "user"` in `manifest.json` — personal to the deploying identity. `deploy.sh` reconciles it on *every* run, not just on create, so a guide switched to `organization` in the UI gets pulled back on the next deploy:
+
+```
+Updating guide 'Flight conventions' (de6cbaeb-…)...
+  access: organization -> user
+```
+
+That matters because `organization` is a one-way door in practice: it exposes the guide to everyone in the org and requires an admin identity to set. Making the repository the source of truth for visibility means an accidental flip cannot quietly persist. Change `access` in the manifest when you genuinely want a guide shared.
+
 > **A rename is not a rename.** Adding these guides involved retitling `Agent commerce Dive style` to `Dive conventions`. Because Guides are looked up by title, the deploy *created* a new guide and left the old one orphaned in the `dives` topic — exactly sharp edge #1 below. The orphan had to be deleted by hand. Retitle deliberately.
 
 ## The one technique that makes this possible

@@ -53,31 +53,36 @@
       "title": "MotherDuck as Code — orientation",
       "topic": "",
       "source": "guides/orientation.md",
-      "description": "What lives in this account and which topic to open next. Root guide: no topic, so it appears in every overview."
+      "description": "What lives in this account and which topic to open next. Root guide: no topic, so it appears in every overview.",
+      "access": "user"
     },
     {
       "title": "Agent commerce metrics",
       "topic": "agent-commerce",
       "source": "guides/agent-commerce-metrics.md",
-      "description": "Revenue definitions, join rules, and pitfalls for the agent_commerce dataset."
+      "description": "Revenue definitions, join rules, and pitfalls for the agent_commerce dataset.",
+      "access": "user"
     },
     {
       "title": "Usage monitoring with QUERY_HISTORY",
       "topic": "platform-observability",
       "source": "guides/usage-monitoring.md",
-      "description": "Attributing MotherDuck compute to Dives, MCP clients, and Flights via user_agent."
+      "description": "Attributing MotherDuck compute to Dives, MCP clients, and Flights via user_agent.",
+      "access": "user"
     },
     {
       "title": "Dive conventions",
       "topic": "dives",
       "source": "guides/dive-conventions.md",
-      "description": "Visual tokens and structural conventions for building Dives in this account."
+      "description": "Visual tokens and structural conventions for building Dives in this account.",
+      "access": "user"
     },
     {
       "title": "Flight conventions",
       "topic": "flights",
       "source": "guides/flight-conventions.md",
-      "description": "How Flights are written, configured, scheduled, and monitored in this account."
+      "description": "How Flights are written, configured, scheduled, and monitored in this account.",
+      "access": "user"
     }
   ]
 }
