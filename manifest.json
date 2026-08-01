@@ -1,0 +1,41 @@
+{
+  "flights": [
+    {
+      "name": "agent-commerce-monthly-rollup",
+      "source": "flights/agent-commerce-monthly-rollup/flight.py",
+      "requirements": "flights/agent-commerce-monthly-rollup/requirements.txt",
+      "schedule_cron": "17 6 * * 1",
+      "config": {
+        "SOURCE_SHARE_URL": "md:_share/agent_commerce/a6ee8703-ade7-4e18-8ec5-e3c09065064f",
+        "SOURCE_ALIAS": "agent_commerce",
+        "TARGET_DATABASE": "agent_commerce_marts",
+        "TARGET_TABLE": "monthly_spend"
+      }
+    }
+  ],
+  "dives": [
+    {
+      "title": "Agent Commerce Overview",
+      "source": "dives/agent-commerce-overview/dive.tsx",
+      "description": "Five interactive tabs over the agent-commerce dataset: revenue by tenant plan, monthly authorized spend, service performance by category, top agent buyers by GMV, and storefront readiness impact.",
+      "required_resources": [
+        { "url": "md:_share/agent_commerce/a6ee8703-ade7-4e18-8ec5-e3c09065064f", "alias": "agent_commerce" },
+        { "url": "md:agent_commerce_marts", "alias": "agent_commerce_marts" }
+      ]
+    }
+  ],
+  "guides": [
+    {
+      "title": "Agent commerce metrics",
+      "topic": "agent-commerce",
+      "source": "guides/agent-commerce-metrics.md",
+      "description": "Revenue definitions, join rules, and pitfalls for the agent_commerce dataset."
+    },
+    {
+      "title": "Agent commerce Dive style",
+      "topic": "dives",
+      "source": "guides/agent-commerce-dive-style.md",
+      "description": "Visual tokens for extending the Agent Commerce Overview Dive."
+    }
+  ]
+}
