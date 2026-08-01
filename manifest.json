@@ -59,28 +59,35 @@
     {
       "title": "Agent commerce metrics",
       "topic": "agent-commerce",
-      "source": "guides/agent-commerce-metrics.md",
+      "source": "guides/agent-commerce/metrics.md",
       "description": "Revenue definitions, join rules, and pitfalls for the agent_commerce dataset.",
+      "access": "user"
+    },
+    {
+      "title": "Revenue run-rate and trend",
+      "topic": "agent-commerce/forecasting",
+      "source": "guides/agent-commerce/forecasting/run-rate.md",
+      "description": "Projecting forward from monthly_spend: month-over-month growth and a trailing 3-month annualized run-rate.",
       "access": "user"
     },
     {
       "title": "Usage monitoring with QUERY_HISTORY",
       "topic": "platform-observability",
-      "source": "guides/usage-monitoring.md",
+      "source": "guides/platform-observability/usage-monitoring.md",
       "description": "Attributing MotherDuck compute to Dives, MCP clients, and Flights via user_agent.",
       "access": "user"
     },
     {
       "title": "Dive conventions",
       "topic": "dives",
-      "source": "guides/dive-conventions.md",
+      "source": "guides/dives/conventions.md",
       "description": "Visual tokens and structural conventions for building Dives in this account.",
       "access": "user"
     },
     {
       "title": "Flight conventions",
       "topic": "flights",
-      "source": "guides/flight-conventions.md",
+      "source": "guides/flights/conventions.md",
       "description": "How Flights are written, configured, scheduled, and monitored in this account.",
       "access": "user"
     }

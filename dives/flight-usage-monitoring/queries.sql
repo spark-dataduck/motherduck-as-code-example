@@ -87,3 +87,19 @@ SELECT count(*)                             AS queries,
 FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
 WHERE user_agent LIKE '%md-flights%'
   AND start_time > now() - INTERVAL 30 DAY;
+
+-- 6. Richer run health --------------------------------------------------------
+-- Same UNION shape as above, with a success rate and average successful runtime.
+-- avg_secs is the early warning: a Flight getting steadily slower is a Flight
+-- heading for a timeout.
+--
+--   round(100.0 * count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED') / count(*), 1) AS success_pct,
+--   round(avg(epoch(ended_at - started_at))
+--         FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1)                            AS avg_secs
+--
+-- Add both to the SELECT in query 3 (or to the generated query from query 2).
+
+
+-- Where to take this next -----------------------------------------------------
+-- Pull MD_GET_FLIGHT_LOGS for the newest failed run_number to surface the error
+-- inline, or chart avg_secs over time to catch a Flight slowing down.

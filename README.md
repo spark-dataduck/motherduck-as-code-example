@@ -4,8 +4,6 @@ Managing MotherDuck resources the way you manage application code: declared in a
 
 The artifacts are just a vehicle. **What this repository is actually showing you is the mechanics**: how a deploy decides between creating and updating, how file contents get into a table function, why order matters, and which parts drift if you don't reconcile them.
 
-This is a teaching artifact, not a framework. If you want branch previews, RBAC, and a supported CLI, use [`motherduckdb/motherduck-blueprints`](https://github.com/motherduckdb/motherduck-blueprints) — this repository exposes the SQL layer underneath tooling like that.
-
 ![Manage MotherDuck as Code](docs/manage-motherduck-as-code.png)
 
 | Artifact | Name |
@@ -103,25 +101,15 @@ Updating guide 'Flight conventions' (de6cbaeb-…)...
 
 This matters because the failure is silent and asymmetric — `organization` exposes a guide org-wide, nothing errors, and nobody is notified. A drifted title breaks loudly; a drifted access level just quietly leaks.
 
-Dive status (`MD_UPDATE_DIVE_STATUS`) is *not* reconciled here, so a Dive promoted to `endorsed` in the UI would persist unnoticed. Same shape of hole, deliberately left open — see the last section.
+Dive status (`MD_UPDATE_DIVE_STATUS`) is *not* reconciled here, so a Dive promoted to `endorsed` in the UI would persist unnoticed. Same shape of hole, deliberately left open.
 
-## 6. Retry is safe for reads, never for creates
-
-The DuckDB CLI intermittently crashes (SIGSEGV / SIGABRT) partway through a MotherDuck session — observed on v1.5.4 at several different `MD_*` call sites, never reproducibly. A crash is not a SQL error, so it's worth retrying.
-
-But only where retrying is safe. `deploy.sh` splits into `md()` (retries) for reads and ID-keyed updates, and `md_once()` (does not) for creates:
-
-> If the server completes a `CREATE` and the client crashes before receiving the reply, a retry produces a **second artifact with a new ID**. That is not hypothetical — it created a duplicate Guide while this repository was being written, caught only by the duplicate-name guard.
-
-Creates fail the whole run instead, which is correct precisely because the script is idempotent: re-run it, and the next lookup finds what the crashed run created and takes the update path.
-
-## 7. Three sharp edges of name-based identity
+## 6. Three sharp edges of name-based identity
 
 1. **Renaming creates a second artifact.** The lookup on the new name finds nothing, so the deployer creates and the old one is orphaned. This happened here: retitling `Agent commerce Dive style` to `Dive conventions` left an orphan in the `dives` topic that had to be deleted by hand.
 2. **Duplicate names fail the deploy** with a non-zero exit rather than guessing which to update. A Dive built by hand in the UI sharing a title will break CI.
-3. **`MD_LIST_*` is identity-scoped.** Deploy once under a personal token and again under a service account: the second run sees no match and creates duplicates. Using a dedicated service account in CI is a **correctness requirement, not hygiene** — it's what keeps the upsert idempotent.
+3. **`MD_LIST_*` is identity-scoped, so deploy with a service account token — not a personal one.** Each identity sees only its own artifacts, so switching tokens makes the next run find no match and create a second set. A dedicated service account keeps the upsert stable and keeps the artifacts owned by automation rather than by one person's account.
 
-## 8. Organizing Guides with topics
+## 7. Organizing Guides with topics
 
 Guides deploy into a **topic tree**, because that's how an agent finds them without paying to load all of them. It calls `list_guides(topic)`, reads the topic names and counts, and opens only what looks relevant — progressive disclosure.
 
@@ -139,34 +127,9 @@ flights/                   Flight conventions          ← reserved topic
 
 Topics nest with slashes and filter by prefix, so `agent-commerce` also returns `agent-commerce/forecasting`. Keep it shallow. Topics carry no identity — any number of guides can share one, and each guide is still addressed by its UUID.
 
-## 9. Where the client picks up what SQL can't do
-
-The `Flight Usage Monitoring` dive exists to show this. `MD_LIST_FLIGHT_RUNS` takes a literal and **rejects a lateral join** — *"only supports literals as parameters"* — so SQL cannot fan out across Flights on its own. The dive queries `MD_LIST_FLIGHTS()`, then assembles the `UNION ALL BY NAME` in JavaScript, one branch per flight ID. It generates exactly the SQL you'd hand-write, without the hand-editing.
-
 ---
 
-# Running it
-
-```bash
-export MOTHERDUCK_TOKEN='<your token>'   # the DuckDB CLI reads this env var
-
-duckdb "md:" -f bootstrap.sql            # once: create the database and share
-./deploy.sh --dry-run                    # see what would change
-./deploy.sh                              # apply
-```
-
-For CI, add `MOTHERDUCK_TOKEN` as a GitHub Actions secret. Pull requests run `--dry-run` and post the plan to the job summary; merges to `main` apply.
-
-**Pin the DuckDB CLI.** MotherDuck supports a specific maximum DuckDB version, and DuckDB releases ahead of it — so a workflow that installs "latest" is a time bomb that goes off the day a new DuckDB ships:
-
-```
-Your DuckDB version (v1.5.5) is not yet supported by MotherDuck.
-The latest supported version is v1.5.4. Please downgrade to use MotherDuck.
-```
-
-The workflow pins `DUCKDB_VERSION: "1.5.4"` and asserts it after install, so a mismatch fails with a clear message instead of a cryptic extension error. Two gotchas if you copy this: the installer reads the version from the `DUCKDB_VERSION` env var, and it only updates its `latest` symlink when the requested version *is* the latest — so pinning means putting `~/.duckdb/cli/<version>` on `PATH`, not `~/.duckdb/cli/latest`. Bump the pin only after MotherDuck announces support.
-
-### Copy-paste SQL
+# Copy-paste SQL
 
 Each monitoring dive ships a `queries.sql` beside it with the exact queries it runs, ready to paste straight into a MotherDuck notebook — no React, no repository required.
 
@@ -178,15 +141,3 @@ Each monitoring dive ships a `queries.sql` beside it with the exact queries it r
 
 These read only customer-accessible surfaces — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions — so they run in your own account unchanged. The first two need org admin on a Business plan; the Flight one is scoped to the calling identity.
 
-Two attribution limits worth knowing before you rely on them:
-
-- **Dives** carry their ID in `user_agent`, so per-Dive attribution works. Compute follows the **viewer**, not the owner.
-- **Flights do not.** Flight connections appear as `md-flights` with no flight ID, so total Flight compute is available but per-Flight is not. Use run history instead.
-
-### About the data
-
-The dataset is a frozen 2024 snapshot, so **the weekly Flight recomputes an identical table every run**. It's here to demonstrate managing a Flight as code — scheduling, config, versioning, ordering — not incremental ingestion. `ACCESS UNRESTRICTED` shares are also region-scoped: a fork in a different cloud region should re-run `bootstrap.sql` against its own account.
-
-### Deliberately left out
-
-Branch-scoped preview resources, cleanup-on-branch-delete, RBAC roles and grants, manifest schema versioning and migrations, and Dive status reconciliation. Each is a real need at scale and each is handled by [`motherduck-blueprints`](https://github.com/motherduckdb/motherduck-blueprints). They're omitted here because preview-name derivation and teardown is where most of that complexity lives, and it would bury the part worth learning.

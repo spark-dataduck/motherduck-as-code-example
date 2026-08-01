@@ -71,6 +71,27 @@ ORDER BY exec_s DESC
 LIMIT 100;
 
 
+
+-- 3. Headline numbers with period-over-period comparison -----------------------
+-- One pass covers both windows: FILTER splits current from previous.
+SELECT
+  count(*) FILTER (start_time > now() - INTERVAL 30 DAY)                               AS cur_queries,
+  count(*) FILTER (start_time <= now() - INTERVAL 30 DAY)                              AS prev_queries,
+  round(sum(epoch(execution_time)) FILTER (start_time > now() - INTERVAL 30 DAY), 1)   AS cur_exec_s,
+  round(sum(epoch(execution_time)) FILTER (start_time <= now() - INTERVAL 30 DAY), 1)  AS prev_exec_s,
+  round(quantile_cont(epoch(execution_time), 0.95)
+        FILTER (start_time > now() - INTERVAL 30 DAY), 2)                              AS p95_s,
+  count(DISTINCT user_name) FILTER (start_time > now() - INTERVAL 30 DAY)              AS cur_viewers
+FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+WHERE user_agent LIKE '%md-dive%'
+  AND start_time > now() - INTERVAL 60 DAY;   -- 2x the window, so both halves are present
+
+
+-- Where to take this next -----------------------------------------------------
+-- Add instance_type to see which duckling sizes Dives land on, or group
+-- start_time by day to watch a launch land.
+
+
 -- Reading the output ---------------------------------------------------------
 -- Compute follows the VIEWER, not the Dive's owner. A Dive opened in the
 -- MotherDuck UI runs on the viewer's own duckling; an embedded Dive runs on
