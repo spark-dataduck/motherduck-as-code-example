@@ -25,8 +25,36 @@ command -v duckdb >/dev/null || { echo "duckdb CLI not found" >&2; exit 1; }
 command -v jq     >/dev/null || { echo "jq not found" >&2; exit 1; }
 : "${MOTHERDUCK_TOKEN:?MOTHERDUCK_TOKEN must be set}"
 
+# The DuckDB CLI intermittently crashes (SIGSEGV / SIGABRT) partway through a
+# MotherDuck session — observed on v1.5.4 at several different MD_* call sites,
+# never reproducibly. A crash is not a SQL error, so it is worth retrying.
+#
+# But retrying is only safe for operations that are idempotent: reads, and
+# updates addressed by an existing ID. It is NOT safe for creates. If the
+# server completed a CREATE and the client crashed before receiving the reply,
+# a retry makes a SECOND artifact with a new ID. (This is not hypothetical —
+# it produced a duplicate Guide during development.)
+#
+# So: `md` retries, `md_once` does not. Creates use md_once and fail the whole
+# script on a crash. That is the correct outcome, because the script as a whole
+# is idempotent: re-run it, and the next lookup finds the artifact the crashed
+# run created and takes the update path instead.
+md_once() { duckdb "md:" "$@"; }
+
+md() {
+  local attempt rc
+  for attempt in 1 2 3; do
+    duckdb "md:" "$@" && return 0
+    rc=$?
+    (( rc < 128 )) && return "$rc"
+    echo "  duckdb crashed (exit $rc); retry ${attempt}/3" >&2
+    sleep 2
+  done
+  return "$rc"
+}
+
 # Run SQL and return a bare value (empty when there are no rows).
-sql1() { duckdb "md:" -csv -noheader -c "$1"; }
+sql1() { md -csv -noheader -c "$1"; }
 
 # --- identity lookups -------------------------------------------------------
 # Each artifact type is keyed on a human-readable name, not a stored ID.
@@ -100,15 +128,15 @@ deploy_flight() {
 
   if [[ -z "$id" ]]; then
     echo "Creating flight '$name'..."
-    duckdb "md:" -c "$preamble FROM MD_CREATE_FLIGHT($args);" >/dev/null
+    md_once -c "$preamble FROM MD_CREATE_FLIGHT($args);" >/dev/null
     id=$(lookup_flight "$name")
   else
     echo "Updating flight '$name' ($id)..."
-    duckdb "md:" -c "$preamble FROM MD_UPDATE_FLIGHT(flight_id => '$id'::UUID, $args);" >/dev/null
+    md -c "$preamble FROM MD_UPDATE_FLIGHT(flight_id => '$id'::UUID, $args);" >/dev/null
   fi
 
   echo "Running flight '$name'..."
-  duckdb "md:" -c "FROM MD_RUN_FLIGHT(flight_id => '$id'::UUID);" >/dev/null
+  md -c "FROM MD_RUN_FLIGHT(flight_id => '$id'::UUID);" >/dev/null
 
   # Wait for the run to finish. The Dive published next reads the table it writes.
   # Statuses are prefixed: RUN_STATUS_SUCCEEDED / _FAILED / _CANCELLED.
@@ -122,7 +150,7 @@ deploy_flight() {
   done
   if [[ "$status" != "RUN_STATUS_SUCCEEDED" ]]; then
     echo "ERROR: flight run finished with status '${status:-unknown}'." >&2
-    duckdb "md:" -c "SELECT logs FROM MD_GET_FLIGHT_LOGS(flight_id => '$id'::UUID, run_number => (SELECT max(run_number) FROM MD_LIST_FLIGHT_RUNS(flight_id => '$id'::UUID)));" >&2 || true
+    md -c "SELECT logs FROM MD_GET_FLIGHT_LOGS(flight_id => '$id'::UUID, run_number => (SELECT max(run_number) FROM MD_LIST_FLIGHT_RUNS(flight_id => '$id'::UUID)));" >&2 || true
     exit 1
   fi
   echo "  Flight run succeeded."
@@ -152,14 +180,14 @@ deploy_dive() {
 
   if [[ -z "$id" ]]; then
     echo "Creating dive '$title'..."
-    id=$(duckdb "md:" -csv -noheader -c "$preamble
+    id=$(md_once -csv -noheader -c "$preamble
       SELECT id FROM MD_CREATE_DIVE(
         title = '$title', content = getvariable('content'),
         description = '$desc', api_version = 1,
         required_resources = [$req]);")
   else
     echo "Updating dive '$title' ($id)..."
-    duckdb "md:" -c "$preamble
+    md -c "$preamble
       FROM MD_UPDATE_DIVE_CONTENT(id = '$id'::UUID, content = getvariable('content'),
                                   api_version = 1, required_resources = [$req]);
       FROM MD_UPDATE_DIVE_METADATA(id = '$id'::UUID, title = '$title', description = '$desc');" >/dev/null
@@ -167,7 +195,45 @@ deploy_dive() {
   echo "  https://app.motherduck.com/dives/$id"
 }
 
-deploy_guides() { :; }
+# --- guides -----------------------------------------------------------------
+deploy_guides() {
+  local n; n=$(jq '.guides | length' "$MANIFEST")
+  local i title topic src desc id preamble
+  # external_id ties each published version back to a commit.
+  local sha="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo local)}"
+
+  for ((i = 0; i < n; i++)); do
+    title=$(jq -r ".guides[$i].title"       "$MANIFEST")
+    topic=$(jq -r ".guides[$i].topic"       "$MANIFEST")
+    src=$(  jq -r ".guides[$i].source"      "$MANIFEST")
+    desc=$( jq -r ".guides[$i].description" "$MANIFEST")
+
+    id=$(lookup_guide "$title" "$topic"); require_single "$id" "$title"
+    preamble="SET VARIABLE guide_content = (SELECT content FROM read_text('$src'));"
+
+    if [[ -z "$id" ]]; then
+      echo "Creating guide '$title'..."
+      md_once -c "$preamble
+        SELECT id FROM MD_CREATE_GUIDE(
+          \"title\"          := '$title',
+          \"topic\"          := '$topic',
+          \"description\"    := '$desc',
+          \"content\"        := getvariable('guide_content'),
+          \"access\"         := 'user',
+          \"change_comment\" := 'deployed from $sha',
+          \"external_id\"    := '$sha');" >/dev/null
+    else
+      echo "Updating guide '$title' ($id)..."
+      md -c "$preamble
+        FROM MD_UPDATE_GUIDE(\"id\" := '$id'::UUID,
+          \"content\"        := getvariable('guide_content'),
+          \"change_comment\" := 'deployed from $sha',
+          \"external_id\"    := '$sha');
+        FROM MD_UPDATE_GUIDE_METADATA(\"id\" := '$id'::UUID,
+          \"title\" := '$title', \"topic\" := '$topic', \"description\" := '$desc');" >/dev/null
+    fi
+  done
+}
 
 main() {
   plan
