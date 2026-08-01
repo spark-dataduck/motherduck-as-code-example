@@ -220,12 +220,17 @@ deploy_guides() {
     id=$(lookup_guide "$title" "$topic"); require_single "$id" "$title"
     preamble="SET VARIABLE guide_content = (SELECT content FROM read_text('$src'));"
 
+    # An empty topic means "root": the guide appears in every get_query_guide
+    # overview. Omit the argument entirely rather than passing ''.
+    local topic_arg=""
+    [[ -n "$topic" ]] && topic_arg="\"topic\" := '$topic',"
+
     if [[ -z "$id" ]]; then
-      echo "Creating guide '$title'..."
+      echo "Creating guide '$title'${topic:+ [$topic]}..."
       md_once -c "$preamble
         SELECT id FROM MD_CREATE_GUIDE(
           \"title\"          := '$title',
-          \"topic\"          := '$topic',
+          $topic_arg
           \"description\"    := '$desc',
           \"content\"        := getvariable('guide_content'),
           \"access\"         := 'user',
@@ -239,7 +244,7 @@ deploy_guides() {
           \"change_comment\" := 'deployed from $sha',
           \"external_id\"    := '$sha');
         FROM MD_UPDATE_GUIDE_METADATA(\"id\" := '$id'::UUID,
-          \"title\" := '$title', \"topic\" := '$topic', \"description\" := '$desc');" >/dev/null
+          \"title\" := '$title', $topic_arg \"description\" := '$desc');" >/dev/null
     fi
   done
 }

@@ -19,8 +19,14 @@
       "source": "dives/agent-commerce-overview/dive.tsx",
       "description": "Five interactive tabs over the agent-commerce dataset: revenue by tenant plan, monthly authorized spend, service performance by category, top agent buyers by GMV, and storefront readiness impact.",
       "required_resources": [
-        { "url": "md:_share/agent_commerce/a6ee8703-ade7-4e18-8ec5-e3c09065064f", "alias": "agent_commerce" },
-        { "url": "md:agent_commerce_marts", "alias": "agent_commerce_marts" }
+        {
+          "url": "md:_share/agent_commerce/a6ee8703-ade7-4e18-8ec5-e3c09065064f",
+          "alias": "agent_commerce"
+        },
+        {
+          "url": "md:agent_commerce_marts",
+          "alias": "agent_commerce_marts"
+        }
       ]
     },
     {
@@ -44,16 +50,34 @@
   ],
   "guides": [
     {
+      "title": "MotherDuck as Code — orientation",
+      "topic": "",
+      "source": "guides/orientation.md",
+      "description": "What lives in this account and which topic to open next. Root guide: no topic, so it appears in every overview."
+    },
+    {
       "title": "Agent commerce metrics",
       "topic": "agent-commerce",
       "source": "guides/agent-commerce-metrics.md",
       "description": "Revenue definitions, join rules, and pitfalls for the agent_commerce dataset."
     },
     {
-      "title": "Agent commerce Dive style",
+      "title": "Usage monitoring with QUERY_HISTORY",
+      "topic": "platform-observability",
+      "source": "guides/usage-monitoring.md",
+      "description": "Attributing MotherDuck compute to Dives, MCP clients, and Flights via user_agent."
+    },
+    {
+      "title": "Dive conventions",
       "topic": "dives",
-      "source": "guides/agent-commerce-dive-style.md",
-      "description": "Visual tokens for extending the Agent Commerce Overview Dive."
+      "source": "guides/dive-conventions.md",
+      "description": "Visual tokens and structural conventions for building Dives in this account."
+    },
+    {
+      "title": "Flight conventions",
+      "topic": "flights",
+      "source": "guides/flight-conventions.md",
+      "description": "How Flights are written, configured, scheduled, and monitored in this account."
     }
   ]
 }
