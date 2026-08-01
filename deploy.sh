@@ -87,9 +87,12 @@ plan() {
   id=$(lookup_flight "$name"); require_single "$id" "$name"
   plan_line "$(action_for "$id")" flight "$name"
 
-  title=$(jq -r '.dives[0].title' "$MANIFEST")
-  id=$(lookup_dive "$title"); require_single "$id" "$title"
-  plan_line "$(action_for "$id")" dive "$title"
+  local nd; nd=$(jq '.dives | length' "$MANIFEST")
+  for ((i = 0; i < nd; i++)); do
+    title=$(jq -r ".dives[$i].title" "$MANIFEST")
+    id=$(lookup_dive "$title"); require_single "$id" "$title"
+    plan_line "$(action_for "$id")" dive "$title"
+  done
 
   local n; n=$(jq '.guides | length' "$MANIFEST")
   for ((i = 0; i < n; i++)); do
@@ -156,43 +159,49 @@ deploy_flight() {
   echo "  Flight run succeeded."
 }
 
-# --- dive -------------------------------------------------------------------
-deploy_dive() {
-  local title src desc req id
-  title=$(jq -r '.dives[0].title'       "$MANIFEST")
-  src=$(  jq -r '.dives[0].source'      "$MANIFEST")
-  desc=$( jq -r '.dives[0].description' "$MANIFEST")
+# --- dives ------------------------------------------------------------------
+deploy_dives() {
+  local n; n=$(jq '.dives | length' "$MANIFEST")
+  local i title src desc req id preamble
 
-  # Build the required_resources list: [{'url': '...', 'alias': '...'}, ...]
-  req=$(jq -r --arg q "'" '.dives[0].required_resources
-        | map("{" + $q + "url" + $q + ": " + $q + .url + $q + ", "
-                  + $q + "alias" + $q + ": " + $q + .alias + $q + "}")
-        | join(", ")' "$MANIFEST")
+  for ((i = 0; i < n; i++)); do
+    title=$(jq -r ".dives[$i].title"       "$MANIFEST")
+    src=$(  jq -r ".dives[$i].source"      "$MANIFEST")
+    desc=$( jq -r ".dives[$i].description" "$MANIFEST")
 
-  # The published Dive declares its databases through required_resources. The
-  # source keeps REQUIRED_DATABASES for local preview; shipping both is a
-  # runtime error, so strip it here.
-  grep -v '^export const REQUIRED_DATABASES' "$src" > "$DIVE_TMP"
+    # Build the required_resources list: [{'url': '...', 'alias': '...'}, ...].
+    # Dives that only read MD_INFORMATION_SCHEMA or MD_LIST_* attach nothing,
+    # and an empty list is accepted.
+    req=$(jq -r --arg q "'" ".dives[$i].required_resources
+          | map(\"{\" + \$q + \"url\" + \$q + \": \" + \$q + .url + \$q + \", \"
+                    + \$q + \"alias\" + \$q + \": \" + \$q + .alias + \$q + \"}\")
+          | join(\", \")" "$MANIFEST")
 
-  id=$(lookup_dive "$title"); require_single "$id" "$title"
+    # The published Dive declares its databases through required_resources. The
+    # source keeps REQUIRED_DATABASES for local preview; shipping both is a
+    # runtime error, so strip it here.
+    grep -v '^export const REQUIRED_DATABASES' "$src" > "$DIVE_TMP"
 
-  local preamble="SET VARIABLE content = (SELECT content FROM read_text('$DIVE_TMP'));"
+    id=$(lookup_dive "$title"); require_single "$id" "$title"
 
-  if [[ -z "$id" ]]; then
-    echo "Creating dive '$title'..."
-    id=$(md_once -csv -noheader -c "$preamble
-      SELECT id FROM MD_CREATE_DIVE(
-        title = '$title', content = getvariable('content'),
-        description = '$desc', api_version = 1,
-        required_resources = [$req]);")
-  else
-    echo "Updating dive '$title' ($id)..."
-    md -c "$preamble
-      FROM MD_UPDATE_DIVE_CONTENT(id = '$id'::UUID, content = getvariable('content'),
-                                  api_version = 1, required_resources = [$req]);
-      FROM MD_UPDATE_DIVE_METADATA(id = '$id'::UUID, title = '$title', description = '$desc');" >/dev/null
-  fi
-  echo "  https://app.motherduck.com/dives/$id"
+    preamble="SET VARIABLE content = (SELECT content FROM read_text('$DIVE_TMP'));"
+
+    if [[ -z "$id" ]]; then
+      echo "Creating dive '$title'..."
+      id=$(md_once -csv -noheader -c "$preamble
+        SELECT id FROM MD_CREATE_DIVE(
+          title = '$title', content = getvariable('content'),
+          description = '$desc', api_version = 1,
+          required_resources = [$req]);")
+    else
+      echo "Updating dive '$title' ($id)..."
+      md -c "$preamble
+        FROM MD_UPDATE_DIVE_CONTENT(id = '$id'::UUID, content = getvariable('content'),
+                                    api_version = 1, required_resources = [$req]);
+        FROM MD_UPDATE_DIVE_METADATA(id = '$id'::UUID, title = '$title', description = '$desc');" >/dev/null
+    fi
+    echo "  https://app.motherduck.com/dives/$id"
+  done
 }
 
 # --- guides -----------------------------------------------------------------
@@ -246,7 +255,7 @@ main() {
   # Order matters: the Dive's required_resources names a database the Flight
   # creates, so the Flight must exist and have run before the Dive is published.
   deploy_flight
-  deploy_dive
+  deploy_dives
   deploy_guides
 }
 

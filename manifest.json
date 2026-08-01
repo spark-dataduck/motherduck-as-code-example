@@ -22,6 +22,24 @@
         { "url": "md:_share/agent_commerce/a6ee8703-ade7-4e18-8ec5-e3c09065064f", "alias": "agent_commerce" },
         { "url": "md:agent_commerce_marts", "alias": "agent_commerce_marts" }
       ]
+    },
+    {
+      "title": "Dive Usage Monitoring",
+      "source": "dives/dive-usage-monitoring/dive.tsx",
+      "description": "Compute attributed to Dives, split by viewing surface (MotherDuck UI, embedded, MCP app), from MD_INFORMATION_SCHEMA.QUERY_HISTORY joined to MD_LIST_DIVES.",
+      "required_resources": []
+    },
+    {
+      "title": "MCP Usage Monitoring",
+      "source": "dives/mcp-usage-monitoring/dive.tsx",
+      "description": "Queries reaching MotherDuck through the MCP server, broken down by calling client and user, from MD_INFORMATION_SCHEMA.QUERY_HISTORY.",
+      "required_resources": []
+    },
+    {
+      "title": "Flight Usage Monitoring",
+      "source": "dives/flight-usage-monitoring/dive.tsx",
+      "description": "Flight inventory and run health from MD_LIST_FLIGHTS and MD_LIST_FLIGHT_RUNS, fanning out across flights in the client because SQL cannot.",
+      "required_resources": []
     }
   ],
   "guides": [
