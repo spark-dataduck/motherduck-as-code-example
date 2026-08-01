@@ -6,15 +6,30 @@ This is a teaching artifact, not a framework. If you want branch previews, RBAC,
 
 ## What it deploys
 
+![Manage MotherDuck as Code](docs/manage-motherduck-as-code.png)
+
 | Artifact | Name | Source |
 | --- | --- | --- |
 | Database + share | `agent_commerce` | `bootstrap.sql` (run once, by hand) |
 | Flight | `agent-commerce-monthly-rollup` | `flights/agent-commerce-monthly-rollup/` |
 | Dive | `Agent Commerce Overview` | `dives/agent-commerce-overview/dive.tsx` |
+| Dive | `Dive Usage Monitoring` | `dives/dive-usage-monitoring/dive.tsx` |
+| Dive | `MCP Usage Monitoring` | `dives/mcp-usage-monitoring/dive.tsx` |
+| Dive | `Flight Usage Monitoring` | `dives/flight-usage-monitoring/dive.tsx` |
 | Guide | `Agent commerce metrics` | `guides/agent-commerce-metrics.md` |
 | Guide | `Agent commerce Dive style` | `guides/agent-commerce-dive-style.md` |
 
 `manifest.json` declares the desired state for all of it. It is the only file you edit to change what deploys.
+
+### The three monitoring dives
+
+These exist as **SQL examples**, and they deliberately use only surfaces a customer can reach — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions. No MotherDuck-internal databases, so you can run them in your own account unchanged.
+
+- **Dive Usage Monitoring** — per-Dive compute, split by where the Dive was viewed. Every Dive query carries the Dive's ID in `user_agent`: `md-dives/v1(<id>)` for the MotherDuck UI, `md-dive-embed/v1(<id>)` for embedded, and `md-dives-mcp-app/v1/v1(<id>,transport=…)` for an MCP app. Compute follows the *viewer*, not the Dive's owner.
+- **MCP Usage Monitoring** — traffic through the MCP server, from `mcp-server-motherduck-remote/1.0.0(<client>)`, broken down by calling client (`claude-user`, `claude-code`, `openai-mcp`, `python-httpx/…`, …) and by user. It excludes Dives-rendered-in-MCP-apps so the two dives don't double-count the same queries.
+- **Flight Usage Monitoring** — inventory and run health. Two real limits shape this one: Flight connections appear in `QUERY_HISTORY` as `md-flights` with **no flight ID**, so per-Flight compute attribution is not available at all; and `MD_LIST_FLIGHT_RUNS` rejects a lateral join (*"only supports literals as parameters"*), so SQL cannot fan out across Flights. The dive therefore reads `MD_LIST_FLIGHTS()` and builds the `UNION ALL BY NAME` over `MD_LIST_FLIGHT_RUNS` **in the client** — one branch per flight ID. It's a good illustration of where the React half of a Dive earns its place.
+
+The first two need org admin on a Business plan, because `QUERY_HISTORY` is org-scoped. The Flight one needs no special role but is scoped to the *calling identity* — Flight SQL functions only show Flights that your own user or service account owns, so an org admin does not automatically see everyone's.
 
 ## The one technique that makes this possible
 
@@ -55,17 +70,45 @@ For CI, add `MOTHERDUCK_TOKEN` as a GitHub Actions secret. Pull requests run `--
 
 This order is not cosmetic. The Dive's `required_resources` names `md:agent_commerce_marts`, a database the Flight creates. Publish the Dive first and it references a table that does not exist yet, so `deploy.sh` waits for the Flight's run to reach `RUN_STATUS_SUCCEEDED` before touching the Dive.
 
-## How identity works — and three sharp edges
+## How identity works: create once, then update by ID
 
-There is no state file and no resource IDs in this repository. Every run asks MotherDuck what already exists:
+There is no state file and no resource IDs committed to this repository. Every run asks MotherDuck what already exists, then branches:
 
-| Artifact | Looked up by |
-| --- | --- |
-| Flight | `flight_name` via `MD_LIST_FLIGHTS()` |
-| Dive | `title` via `MD_LIST_DIVES()` |
-| Guide | `title` + `topic` via `MD_LIST_GUIDES()` |
+**First run** — nothing exists yet. The lookup returns no rows, so `deploy.sh` calls the *create* function and MotherDuck assigns an ID:
 
-That keeps the repository clean, but it has consequences worth knowing before you adopt the pattern:
+```
+lookup by name  ->  (no match)  ->  MD_CREATE_FLIGHT / MD_CREATE_DIVE / MD_CREATE_GUIDE
+```
+
+**Every run after that** — the lookup finds the artifact, and the deployer switches to the *update* functions, addressing it by the ID it just resolved:
+
+```
+lookup by name  ->  id  ->  MD_UPDATE_FLIGHT(flight_id => id)
+                            MD_UPDATE_DIVE_CONTENT(id) + MD_UPDATE_DIVE_METADATA(id)
+                            MD_UPDATE_GUIDE(id)        + MD_UPDATE_GUIDE_METADATA(id)
+```
+
+So names are the *lookup* key and IDs are the *write* key. The name is what you version in Git; the ID never leaves MotherDuck. That is what makes the script idempotent — run it ten times and you get one of each artifact, not ten.
+
+| Artifact | Looked up by | Then written by |
+| --- | --- | --- |
+| Flight | `flight_name` via `MD_LIST_FLIGHTS()` | `flight_id` |
+| Dive | `title` via `MD_LIST_DIVES()` | `id` |
+| Guide | `title` + `topic` via `MD_LIST_GUIDES()` | `id` |
+
+`./deploy.sh --dry-run` shows you which branch each artifact will take before anything runs:
+
+```
+ACTION   TYPE           NAME
+update   flight         agent-commerce-monthly-rollup
+update   dive           Agent Commerce Overview
+create   dive           Dive Usage Monitoring
+update   guide          Agent commerce metrics
+```
+
+### Three sharp edges
+
+Resolving identity by name keeps the repository clean, but it has consequences worth knowing before you adopt the pattern:
 
 1. **Renaming a Dive's `title` creates a second Dive.** The lookup on the new title finds nothing, so the deployer creates. The old Dive is orphaned, not renamed.
 2. **Duplicate titles fail the deploy** with a non-zero exit rather than guessing which to update. A Dive you built by hand in the UI that happens to share a title will break CI.
