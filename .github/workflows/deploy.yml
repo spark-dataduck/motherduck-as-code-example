@@ -1,0 +1,43 @@
+name: Deploy to MotherDuck
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install DuckDB CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL https://install.duckdb.org | sh
+          echo "$HOME/.duckdb/cli/latest" >> "$GITHUB_PATH"
+
+      # Pull requests plan only. Nothing is mutated until the change is merged.
+      - name: Plan
+        if: github.event_name == 'pull_request'
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### MotherDuck deployment plan'
+            echo
+            echo '```'
+            ./deploy.sh --dry-run
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply
+        if: github.event_name == 'push'
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        run: ./deploy.sh
