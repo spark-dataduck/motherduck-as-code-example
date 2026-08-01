@@ -15,6 +15,7 @@
 // The same SQL, ready to paste into a notebook, is in queries.sql.
 
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 export const REQUIRED_DATABASES = [];
 
@@ -140,8 +141,6 @@ export default function McpUsageMonitoring() {
   const [cliDir,  setCliDir]    = useDiveState<string>("cli_dir", "desc");
   const [usrSort, setUsrSort]   = useDiveState<string>("usr_sort", "queries");
   const [usrDir,  setUsrDir]    = useDiveState<string>("usr_dir", "desc");
-  const [daySort, setDaySort]   = useDiveState<string>("day_sort", "day");
-  const [dayDir,  setDayDir]    = useDiveState<string>("day_dir", "desc");
 
   const d = Number(days) || 30;
 
@@ -214,7 +213,7 @@ export default function McpUsageMonitoring() {
            coalesce(h.queries, 0) AS queries,
            coalesce(h.exec_s, 0)  AS exec_s
     FROM spine s LEFT JOIN hits h USING (day)
-    ORDER BY s.day DESC
+    ORDER BY s.day
   `, { enabled: ready });
 
   const k = rowsOf(kpi.data)[0] ?? {};
@@ -297,19 +296,37 @@ export default function McpUsageMonitoring() {
         />
       </Card>
 
-      <Card title="Daily volume" note="Built on a date spine, so a day with no traffic shows as 0 rather than disappearing.">
-        <SortTable
-          cols={[
-            { key: "day",     label: "Day", ts: true },
-            { key: "queries", label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
-            { key: "exec_s",  label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
-          ]}
-          rows={rowsOf(daily.data).map((r) => ({ day: S(r.day), queries: N(r.queries), exec_s: N(r.exec_s) }))}
-          loading={probe.isLoading || daily.isLoading}
-          sortKey={daySort} dir={dayDir}
-          onSort={sortToggle(daySort, setDaySort, dayDir, setDayDir)}
-          empty="No MCP traffic in this window."
-        />
+      <Card title="Daily volume"
+            note="Queries and execution time share an x-axis but not a y-axis — they differ by orders of magnitude, so each gets its own scale. Built on a date spine, so a day with no traffic plots as 0 instead of vanishing.">
+        {probe.isLoading || daily.isLoading ? <Skel h={260} /> : (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={rowsOf(daily.data).map((r) => ({
+                day: S(r.day).slice(5),         // MM-DD is enough on an axis
+                queries: N(r.queries),
+                exec_s: N(r.exec_s),
+              }))}
+              margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid stroke="#f1f3f4" vertical={false} />
+              <XAxis dataKey="day" tick={{ fill: C.muted, fontSize: 11 }}
+                     axisLine={{ stroke: C.border }} tickLine={false} minTickGap={16} />
+              <YAxis yAxisId="q" tick={{ fill: C.muted, fontSize: 11 }}
+                     axisLine={false} tickLine={false} width={48}
+                     tickFormatter={(v: number) => fmtNum(v)} />
+              <YAxis yAxisId="s" orientation="right" tick={{ fill: C.muted, fontSize: 11 }}
+                     axisLine={false} tickLine={false} width={48}
+                     tickFormatter={(v: number) => fmtSec(v)} />
+              <Tooltip
+                contentStyle={{ border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 12 }}
+                formatter={(v: any, n: any) => (n === "Exec time" ? fmtSec(N(v)) : fmtNum(N(v)))} />
+              <Legend wrapperStyle={{ fontSize: 12, color: C.muted }} />
+              <Line yAxisId="q" type="monotone" dataKey="queries" name="Queries"
+                    stroke={C.blue} strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="s" type="monotone" dataKey="exec_s" name="Exec time"
+                    stroke={C.green} strokeWidth={2} dot={false} isAnimationActive={false}
+                    strokeDasharray="4 3" />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
       </Card>
 
       <p style={{ color: C.muted, fontSize: 12, marginTop: 20, lineHeight: 1.6 }}>

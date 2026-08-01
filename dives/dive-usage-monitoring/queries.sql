@@ -93,6 +93,57 @@ WHERE user_agent LIKE '%md-dive%'
 -- start_time by day to watch a launch land.
 
 
+-- 4. By owner: who authors Dives, and does anyone use them? -------------------
+-- dives_created counts everything the owner has; dives_used counts only the
+-- ones with traffic in the window. A wide gap between the two is the useful
+-- signal — Dives authored and then abandoned.
+WITH dive_queries AS (
+  SELECT regexp_extract(user_agent,
+           'md-dive[s]?(?:-embed)?(?:-mcp-app)?/v1(?:/v1)?[(_]([0-9a-f\-]{36})', 1) AS dive_id,
+         user_name, execution_time
+  FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+  WHERE user_agent LIKE '%md-dive%'
+    AND start_time > now() - INTERVAL 30 DAY
+),
+dive_names AS (
+  SELECT id::VARCHAR AS dive_id, owner_name
+  FROM MD_LIST_DIVES(include_org_shares := true)
+),
+authored AS (SELECT owner_name, count(*) AS dives_created FROM dive_names GROUP BY 1)
+SELECT a.owner_name,
+       a.dives_created,
+       count(DISTINCT q.dive_id)              AS dives_used,
+       count(DISTINCT q.user_name)            AS viewers,
+       count(q.dive_id)                       AS queries,
+       round(sum(epoch(q.execution_time)), 1) AS exec_s
+FROM authored a
+LEFT JOIN dive_names n USING (owner_name)
+LEFT JOIN dive_queries q USING (dive_id)
+GROUP BY ALL
+ORDER BY exec_s DESC NULLS LAST;
+
+
+-- 5. By viewer: whose duckling is the compute landing on? ---------------------
+-- Compute follows the viewer, not the Dive's owner, so this is the table that
+-- maps usage to the account actually being billed for it.
+SELECT user_name AS viewer,
+       count(DISTINCT regexp_extract(user_agent,
+         'md-dive[s]?(?:-embed)?(?:-mcp-app)?/v1(?:/v1)?[(_]([0-9a-f\-]{36})', 1)) AS dives_viewed,
+       string_agg(DISTINCT CASE
+         WHEN user_agent LIKE '%md-dives-mcp-app%' THEN 'MCP app'
+         WHEN user_agent LIKE '%md-dive-embed%'    THEN 'Embedded'
+         WHEN user_agent LIKE '%md-dives%'         THEN 'UI' END, ', ') AS surfaces,
+       string_agg(DISTINCT instance_type, ', ')             AS duckling_sizes,
+       count(*)                                             AS queries,
+       round(sum(epoch(execution_time)), 1)                 AS exec_s,
+       round(quantile_cont(epoch(execution_time), 0.95), 2) AS p95_s
+FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+WHERE user_agent LIKE '%md-dive%'
+  AND start_time > now() - INTERVAL 30 DAY
+GROUP BY ALL
+ORDER BY exec_s DESC;
+
+
 -- Reading the output ---------------------------------------------------------
 -- Compute follows the VIEWER, not the Dive's owner. A Dive opened in the
 -- MotherDuck UI runs on the viewer's own duckling; an embedded Dive runs on

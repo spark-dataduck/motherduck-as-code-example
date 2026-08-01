@@ -66,7 +66,7 @@ function Scorecard({ label, value, loading, delta, first }: any) {
 }
 
 // Sorts client-side over rows already fetched — never re-queries to re-sort.
-function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
+function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty, limit, expanded, onToggle }: any) {
   if (loading) return <Skel h={160} />;
   if (!rows.length) return <p style={{ color: C.muted, fontSize: 13, padding: "16px 0" }}>{empty}</p>;
   const sorted = [...rows].sort((a: any, b: any) => {
@@ -74,6 +74,9 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
     const c = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y));
     return dir === "asc" ? c : -c;
   });
+  // Cap applies AFTER sorting, so "top 20" tracks whichever column is sorted.
+  const capped = limit && !expanded ? sorted.slice(0, limit) : sorted;
+  const hidden = sorted.length - capped.length;
   return (
     <div style={{ overflowX: "auto" }}>
       <table className="w-full" style={{ color: C.text, fontSize: 13, borderCollapse: "collapse" }}>
@@ -91,7 +94,7 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r: any, i: number) => (
+          {capped.map((r: any, i: number) => (
             <tr key={i} style={{ borderBottom: "1px solid #f1f3f4" }} className="hover:bg-gray-50">
               {cols.map((c: any, i: number) => (
                 <td key={c.key} className={"py-2.5 " + (c.num || c.ts ? "text-right tabular-nums" : "text-left")}
@@ -103,6 +106,13 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty }: any) {
           ))}
         </tbody>
       </table>
+      {limit && (hidden > 0 || expanded) && (
+        <button onClick={onToggle}
+          style={{ marginTop: 12, background: "none", border: "none", color: C.blue,
+                   fontSize: 13, cursor: "pointer", padding: 0 }}>
+          {expanded ? "Show less" : `Show ${hidden} more`}
+        </button>
+      )}
     </div>
   );
 }
@@ -146,6 +156,11 @@ export default function DiveUsageMonitoring() {
   const [surfDir,  setSurfDir]  = useDiveState<string>("surf_dir", "desc");
   const [diveSort, setDiveSort] = useDiveState<string>("dive_sort", "exec_s");
   const [diveDir,  setDiveDir]  = useDiveState<string>("dive_dir", "desc");
+  const [showAll,  setShowAll]  = useDiveState<boolean>("dive_show_all", false);
+  const [ownSort,  setOwnSort]  = useDiveState<string>("own_sort", "exec_s");
+  const [ownDir,   setOwnDir]   = useDiveState<string>("own_dir", "desc");
+  const [viewSort, setViewSort] = useDiveState<string>("view_sort", "exec_s");
+  const [viewDir,  setViewDir]  = useDiveState<string>("view_dir", "desc");
 
   const d = Number(days) || 30;
 
@@ -213,6 +228,58 @@ export default function DiveUsageMonitoring() {
     GROUP BY ALL
     ORDER BY exec_s DESC
     LIMIT 100
+  `, { enabled: ready });
+
+
+  // Who authors Dives, and does anyone use them? dives_created counts every
+  // Dive the owner has; dives_used counts the ones with traffic in the window.
+  const byOwner = useSQLQuery(`
+    WITH dive_queries AS (
+      SELECT regexp_extract(user_agent,
+               'md-dive[s]?(?:-embed)?(?:-mcp-app)?/v1(?:/v1)?[(_]([0-9a-f\\-]{36})', 1) AS dive_id,
+             user_name, execution_time, start_time
+      FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+      WHERE user_agent LIKE '%md-dive%'
+        AND start_time > now() - INTERVAL ${d} DAY
+    ),
+    dive_names AS (
+      SELECT id::VARCHAR AS dive_id, owner_name
+      FROM MD_LIST_DIVES(include_org_shares := true)
+    ),
+    authored AS (SELECT owner_name, count(*) AS dives_created FROM dive_names GROUP BY 1)
+    SELECT a.owner_name,
+           a.dives_created,
+           count(DISTINCT q.dive_id)              AS dives_used,
+           count(DISTINCT q.user_name)            AS viewers,
+           count(q.dive_id)                       AS queries,
+           round(sum(epoch(q.execution_time)), 1) AS exec_s
+    FROM authored a
+    LEFT JOIN dive_names n USING (owner_name)
+    LEFT JOIN dive_queries q USING (dive_id)
+    GROUP BY ALL
+    ORDER BY exec_s DESC NULLS LAST
+    LIMIT 50
+  `, { enabled: ready });
+
+  // Who is doing the viewing, on which surfaces, and on what duckling size.
+  const byViewer = useSQLQuery(`
+    SELECT user_name AS viewer,
+           count(DISTINCT regexp_extract(user_agent,
+             'md-dive[s]?(?:-embed)?(?:-mcp-app)?/v1(?:/v1)?[(_]([0-9a-f\\-]{36})', 1)) AS dives_viewed,
+           string_agg(DISTINCT CASE
+             WHEN user_agent LIKE '%md-dives-mcp-app%' THEN 'MCP app'
+             WHEN user_agent LIKE '%md-dive-embed%'    THEN 'Embedded'
+             WHEN user_agent LIKE '%md-dives%'         THEN 'UI' END, ', ')  AS surfaces,
+           string_agg(DISTINCT instance_type, ', ')                          AS duckling_sizes,
+           count(*)                                                          AS queries,
+           round(sum(epoch(execution_time)), 1)                              AS exec_s,
+           round(quantile_cont(epoch(execution_time), 0.95), 2)              AS p95_s
+    FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+    WHERE user_agent LIKE '%md-dive%'
+      AND start_time > now() - INTERVAL ${d} DAY
+    GROUP BY ALL
+    ORDER BY exec_s DESC
+    LIMIT 50
   `, { enabled: ready });
 
   const k = rowsOf(kpi.data)[0] ?? {};
@@ -289,6 +356,54 @@ export default function DiveUsageMonitoring() {
           loading={probe.isLoading || byDive.isLoading}
           sortKey={diveSort} dir={diveDir}
           onSort={sortToggle(diveSort, setDiveSort, diveDir, setDiveDir)}
+          empty="No Dive activity in this window."
+          limit={20} expanded={showAll} onToggle={() => setShowAll(!showAll)}
+        />
+      </Card>
+
+      <Card title="By owner"
+            note="Who authors Dives, and whether anyone uses them. dives_created counts everything the owner has; dives used counts the ones with traffic in this window.">
+        <SortTable
+          cols={[
+            { key: "owner_name",    label: "Owner" },
+            { key: "dives_created", label: "Dives created", num: true },
+            { key: "dives_used",    label: "Dives used", num: true },
+            { key: "viewers",       label: "Viewers", num: true },
+            { key: "queries",       label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
+            { key: "exec_s",        label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
+          ]}
+          rows={rowsOf(byOwner.data).map((r) => ({
+            owner_name: S(r.owner_name), dives_created: N(r.dives_created),
+            dives_used: N(r.dives_used), viewers: N(r.viewers),
+            queries: N(r.queries), exec_s: N(r.exec_s),
+          }))}
+          loading={probe.isLoading || byOwner.isLoading}
+          sortKey={ownSort} dir={ownDir}
+          onSort={sortToggle(ownSort, setOwnSort, ownDir, setOwnDir)}
+          empty="No Dives visible in this window."
+        />
+      </Card>
+
+      <Card title="By viewer"
+            note="Compute follows the viewer, so this is the table that maps usage to whose duckling it ran on.">
+        <SortTable
+          cols={[
+            { key: "viewer",         label: "Viewer" },
+            { key: "dives_viewed",   label: "Dives viewed", num: true },
+            { key: "surfaces",       label: "Surfaces" },
+            { key: "duckling_sizes", label: "Duckling size" },
+            { key: "queries",        label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
+            { key: "exec_s",         label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
+            { key: "p95_s",          label: "p95", num: true, fmt: (v: any) => `${N(v).toFixed(2)}s` },
+          ]}
+          rows={rowsOf(byViewer.data).map((r) => ({
+            viewer: S(r.viewer), dives_viewed: N(r.dives_viewed), surfaces: S(r.surfaces),
+            duckling_sizes: S(r.duckling_sizes), queries: N(r.queries),
+            exec_s: N(r.exec_s), p95_s: N(r.p95_s),
+          }))}
+          loading={probe.isLoading || byViewer.isLoading}
+          sortKey={viewSort} dir={viewDir}
+          onSort={sortToggle(viewSort, setViewSort, viewDir, setViewDir)}
           empty="No Dive activity in this window."
         />
       </Card>
