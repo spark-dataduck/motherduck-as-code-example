@@ -157,6 +157,8 @@ export default function DiveUsageMonitoring() {
   const [diveSort, setDiveSort] = useDiveState<string>("dive_sort", "exec_s");
   const [diveDir,  setDiveDir]  = useDiveState<string>("dive_dir", "desc");
   const [showAll,  setShowAll]  = useDiveState<boolean>("dive_show_all", false);
+  const [showAllOwn,  setShowAllOwn]  = useDiveState<boolean>("own_show_all", false);
+  const [showAllView, setShowAllView] = useDiveState<boolean>("view_show_all", false);
   const [ownSort,  setOwnSort]  = useDiveState<string>("own_sort", "exec_s");
   const [ownDir,   setOwnDir]   = useDiveState<string>("own_dir", "desc");
   const [viewSort, setViewSort] = useDiveState<string>("view_sort", "exec_s");
@@ -357,20 +359,20 @@ export default function DiveUsageMonitoring() {
           sortKey={diveSort} dir={diveDir}
           onSort={sortToggle(diveSort, setDiveSort, diveDir, setDiveDir)}
           empty="No Dive activity in this window."
-          limit={20} expanded={showAll} onToggle={() => setShowAll(!showAll)}
+          limit={10} expanded={showAll} onToggle={() => setShowAll(!showAll)}
         />
       </Card>
 
       <Card title="By owner"
-            note="Who authors Dives, and whether anyone uses them. dives_created counts everything the owner has; dives used counts the ones with traffic in this window.">
+            note="Traffic each owner's Dives RECEIVED — not what the owner ran themselves. Queries received and exec received are other people using their Dives; for a person's own consumption, see By viewer below. Dives created counts everything they own; dives used counts the ones with traffic in this window.">
         <SortTable
           cols={[
             { key: "owner_name",    label: "Owner" },
             { key: "dives_created", label: "Dives created", num: true },
             { key: "dives_used",    label: "Dives used", num: true },
             { key: "viewers",       label: "Viewers", num: true },
-            { key: "queries",       label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
-            { key: "exec_s",        label: "Exec time", num: true, fmt: (v: any) => fmtSec(N(v)) },
+            { key: "queries",       label: "Queries received", num: true, fmt: (v: any) => fmtNum(N(v)) },
+            { key: "exec_s",        label: "Exec received", num: true, fmt: (v: any) => fmtSec(N(v)) },
           ]}
           rows={rowsOf(byOwner.data).map((r) => ({
             owner_name: S(r.owner_name), dives_created: N(r.dives_created),
@@ -381,11 +383,12 @@ export default function DiveUsageMonitoring() {
           sortKey={ownSort} dir={ownDir}
           onSort={sortToggle(ownSort, setOwnSort, ownDir, setOwnDir)}
           empty="No Dives visible in this window."
+          limit={10} expanded={showAllOwn} onToggle={() => setShowAllOwn(!showAllOwn)}
         />
       </Card>
 
       <Card title="By viewer"
-            note="Compute follows the viewer, so this is the table that maps usage to whose duckling it ran on.">
+            note="What each person CONSUMED, whoever authored the Dive. Compute follows the viewer, so this is the account whose duckling ran the query and whose usage it counts against — the mirror image of By owner above.">
         <SortTable
           cols={[
             { key: "viewer",         label: "Viewer" },
@@ -405,6 +408,7 @@ export default function DiveUsageMonitoring() {
           sortKey={viewSort} dir={viewDir}
           onSort={sortToggle(viewSort, setViewSort, viewDir, setViewDir)}
           empty="No Dive activity in this window."
+          limit={10} expanded={showAllView} onToggle={() => setShowAllView(!showAllView)}
         />
       </Card>
 

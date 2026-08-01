@@ -94,6 +94,11 @@ WHERE user_agent LIKE '%md-dive%'
 
 
 -- 4. By owner: who authors Dives, and does anyone use them? -------------------
+-- IMPORTANT: queries and exec_s here are traffic the owner's Dives RECEIVED
+-- from anyone — NOT what the owner ran themselves. The join is on the Dives
+-- they own, so a prolific author with idle Dives shows a low number even if
+-- they personally query all day. For a person's own consumption, use query 5.
+--
 -- dives_created counts everything the owner has; dives_used counts only the
 -- ones with traffic in the window. A wide gap between the two is the useful
 -- signal — Dives authored and then abandoned.
@@ -114,18 +119,19 @@ SELECT a.owner_name,
        a.dives_created,
        count(DISTINCT q.dive_id)              AS dives_used,
        count(DISTINCT q.user_name)            AS viewers,
-       count(q.dive_id)                       AS queries,
-       round(sum(epoch(q.execution_time)), 1) AS exec_s
+       count(q.dive_id)                       AS queries_received,
+       round(sum(epoch(q.execution_time)), 1) AS exec_s_received
 FROM authored a
 LEFT JOIN dive_names n USING (owner_name)
 LEFT JOIN dive_queries q USING (dive_id)
 GROUP BY ALL
-ORDER BY exec_s DESC NULLS LAST;
+ORDER BY exec_s_received DESC NULLS LAST;
 
 
 -- 5. By viewer: whose duckling is the compute landing on? ---------------------
--- Compute follows the viewer, not the Dive's owner, so this is the table that
--- maps usage to the account actually being billed for it.
+-- The mirror image of query 4: what each person CONSUMED, whoever authored the
+-- Dive. Compute follows the viewer, not the owner, so this is the account
+-- actually being billed for it.
 SELECT user_name AS viewer,
        count(DISTINCT regexp_extract(user_agent,
          'md-dive[s]?(?:-embed)?(?:-mcp-app)?/v1(?:/v1)?[(_]([0-9a-f\-]{36})', 1)) AS dives_viewed,
