@@ -1,71 +1,67 @@
 # MotherDuck as Code — a worked example
 
-A small, complete example of managing MotherDuck resources in Git: a **Flight**, a **Dive**, and two **Guides**, deployed by CI that calls the `MD_*` SQL functions directly. The whole deployer is one bash script you can read top to bottom.
+Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. A **Flight**, four **Dives**, five **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
 
-This is a teaching artifact, not a framework. If you want branch previews, RBAC, schema versioning, and a supported CLI, use [`motherduckdb/motherduck-blueprints`](https://github.com/motherduckdb/motherduck-blueprints) — this repository exposes the SQL layer that sits underneath tooling like that.
+The artifacts are just a vehicle. **What this repository is actually showing you is the mechanics**: how a deploy decides between creating and updating, how file contents get into a table function, why order matters, and which parts drift if you don't reconcile them.
 
-## What it deploys
+This is a teaching artifact, not a framework. If you want branch previews, RBAC, and a supported CLI, use [`motherduckdb/motherduck-blueprints`](https://github.com/motherduckdb/motherduck-blueprints) — this repository exposes the SQL layer underneath tooling like that.
 
 ![Manage MotherDuck as Code](docs/manage-motherduck-as-code.png)
 
-| Artifact | Name | Source |
+| Artifact | Name |
+| --- | --- |
+| Database + share | `agent_commerce` |
+| Flight | `agent-commerce-monthly-rollup` |
+| Dives | `Agent Commerce Overview` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
+| Guides | `MotherDuck as Code — orientation` · `Agent commerce metrics` · `Usage monitoring with QUERY_HISTORY` · `Dive conventions` · `Flight conventions` |
+
+---
+
+# How it works
+
+## 1. One manifest holds the desired state
+
+`manifest.json` is the only file you edit to change what deploys. It names every artifact, points at its source file, and declares the properties the repository owns — a Flight's schedule and config, a Dive's `required_resources`, a Guide's topic and visibility.
+
+Everything else follows from it. `deploy.sh` reads the manifest, and nothing is hardcoded in the script that a user would reasonably want to change.
+
+## 2. Create once, then update by ID
+
+There is no state file and **no resource IDs committed anywhere**. Every run asks MotherDuck what already exists, then branches.
+
+**First run** — the lookup returns nothing, so the deployer creates and MotherDuck assigns an ID:
+
+```
+lookup by name  ->  (no match)  ->  MD_CREATE_FLIGHT / MD_CREATE_DIVE / MD_CREATE_GUIDE
+```
+
+**Every run after** — the lookup finds it, and the deployer updates *by the ID it just resolved*:
+
+```
+lookup by name  ->  id  ->  MD_UPDATE_FLIGHT(flight_id => id)
+                            MD_UPDATE_DIVE_CONTENT(id) + MD_UPDATE_DIVE_METADATA(id)
+                            MD_UPDATE_GUIDE(id)        + MD_UPDATE_GUIDE_METADATA(id)
+```
+
+Names are the **lookup** key; IDs are the **write** key. The name is what you version in Git; the ID never leaves MotherDuck. That split is what makes the script idempotent — run it ten times, get one of each.
+
+| Artifact | Looked up by | Then written by |
 | --- | --- | --- |
-| Database + share | `agent_commerce` | `bootstrap.sql` (run once, by hand) |
-| Flight | `agent-commerce-monthly-rollup` | `flights/agent-commerce-monthly-rollup/` |
-| Dive | `Agent Commerce Overview` | `dives/agent-commerce-overview/dive.tsx` |
-| Dive | `Dive Usage Monitoring` | `dives/dive-usage-monitoring/dive.tsx` |
-| Dive | `MCP Usage Monitoring` | `dives/mcp-usage-monitoring/dive.tsx` |
-| Dive | `Flight Usage Monitoring` | `dives/flight-usage-monitoring/dive.tsx` |
-| Guide | `MotherDuck as Code — orientation` | `guides/orientation.md` |
-| Guide | `Agent commerce metrics` | `guides/agent-commerce-metrics.md` |
-| Guide | `Usage monitoring with QUERY_HISTORY` | `guides/usage-monitoring.md` |
-| Guide | `Dive conventions` | `guides/dive-conventions.md` |
-| Guide | `Flight conventions` | `guides/flight-conventions.md` |
+| Flight | `flight_name` via `MD_LIST_FLIGHTS()` | `flight_id` |
+| Dive | `title` via `MD_LIST_DIVES()` | `id` |
+| Guide | `title` + `topic` via `MD_LIST_GUIDES()` | `id` |
 
-`manifest.json` declares the desired state for all of it. It is the only file you edit to change what deploys.
-
-### The three monitoring dives
-
-These exist as **SQL examples**, and they deliberately use only surfaces a customer can reach — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions. No MotherDuck-internal databases, so you can run them in your own account unchanged.
-
-- **Dive Usage Monitoring** — per-Dive compute, split by where the Dive was viewed. Every Dive query carries the Dive's ID in `user_agent`: `md-dives/v1(<id>)` for the MotherDuck UI, `md-dive-embed/v1(<id>)` for embedded, and `md-dives-mcp-app/v1/v1(<id>,transport=…)` for an MCP app. Compute follows the *viewer*, not the Dive's owner.
-- **MCP Usage Monitoring** — traffic through the MCP server, from `mcp-server-motherduck-remote/1.0.0(<client>)`, broken down by calling client (`claude-user`, `claude-code`, `openai-mcp`, `python-httpx/…`, …) and by user. It excludes Dives-rendered-in-MCP-apps so the two dives don't double-count the same queries.
-- **Flight Usage Monitoring** — inventory and run health. Two real limits shape this one: Flight connections appear in `QUERY_HISTORY` as `md-flights` with **no flight ID**, so per-Flight compute attribution is not available at all; and `MD_LIST_FLIGHT_RUNS` rejects a lateral join (*"only supports literals as parameters"*), so SQL cannot fan out across Flights. The dive therefore reads `MD_LIST_FLIGHTS()` and builds the `UNION ALL BY NAME` over `MD_LIST_FLIGHT_RUNS` **in the client** — one branch per flight ID. It's a good illustration of where the React half of a Dive earns its place.
-
-The first two need org admin on a Business plan, because `QUERY_HISTORY` is org-scoped. The Flight one needs no special role but is scoped to the *calling identity* — Flight SQL functions only show Flights that your own user or service account owns, so an org admin does not automatically see everyone's.
-
-### Organizing Guides with topics
-
-Guides are deployed into a **topic tree**, because that is how an agent finds them without paying for all of them. Rather than loading every guide up front, an agent calls `list_guides(topic)`, sees the topic names and their guide counts, and drills into the ones that look relevant — progressive disclosure.
+`./deploy.sh --dry-run` shows which branch each artifact takes before anything runs:
 
 ```
-(root)                     MotherDuck as Code — orientation
-agent-commerce/            Agent commerce metrics
-platform-observability/    Usage monitoring with QUERY_HISTORY
-dives/                     Dive conventions            ← reserved topic
-flights/                   Flight conventions          ← reserved topic
+ACTION   TYPE           NAME
+update   flight         agent-commerce-monthly-rollup
+update   dive           Agent Commerce Overview
+create   dive           Dive Usage Monitoring
+update   guide          Agent commerce metrics
 ```
 
-Three rules shaped that layout:
-
-- **The root is reserved for the one guide that is always worth loading.** Guides with no topic appear in *every* overview, so they cost tokens in every session. `MotherDuck as Code — orientation` earns that slot by being a map — what lives in which database, and which topic to open next — rather than a manual.
-- **Topic names are the only thing an agent judges before opening.** `agent-commerce` and `platform-observability` say what domain they cover; `misc` or `team-docs` would not.
-- **`dives` and `flights` are reserved topics** for Dive and Flight conventions. Agents reach them through their own entry points, and they are deliberately excluded from the root overview. Having both here is the point: one shows how Dives should look, the other how Flights should be written and operated.
-
-Topics nest with slashes (`agent-commerce/forecasting` lives inside `agent-commerce`), and filtering is prefix-based, so asking for `agent-commerce` also returns everything beneath it. Keep it shallow — a few well-named top-level topics with at most a level or two below beats a deep tree. Topics carry no identity: any number of guides can share one, and each guide is still addressed by its own UUID.
-
-**Visibility is declared, not assumed.** Every guide carries `"access": "user"` in `manifest.json` — personal to the deploying identity. `deploy.sh` reconciles it on *every* run, not just on create, so a guide switched to `organization` in the UI gets pulled back on the next deploy:
-
-```
-Updating guide 'Flight conventions' (de6cbaeb-…)...
-  access: organization -> user
-```
-
-That matters because `organization` is a one-way door in practice: it exposes the guide to everyone in the org and requires an admin identity to set. Making the repository the source of truth for visibility means an accidental flip cannot quietly persist. Change `access` in the manifest when you genuinely want a guide shared.
-
-> **A rename is not a rename.** Adding these guides involved retitling `Agent commerce Dive style` to `Dive conventions`. Because Guides are looked up by title, the deploy *created* a new guide and left the old one orphaned in the `dives` topic — exactly sharp edge #1 below. The orphan had to be deleted by hand. Retitle deliberately.
-
-## The one technique that makes this possible
+## 3. Getting a file into a table function
 
 `MD_CREATE_DIVE`, `MD_CREATE_GUIDE`, and `MD_CREATE_FLIGHT` are **table functions**, so their arguments must be literals. Both obvious ways to pass a file's contents fail:
 
@@ -77,16 +73,79 @@ SELECT id FROM MD_CREATE_DIVE(content = read_text('dive.tsx'), ...);
 SELECT id FROM MD_CREATE_DIVE(content = (SELECT content FROM read_text('dive.tsx')), ...);
 ```
 
-`SET VARIABLE` accepts the subquery, and `getvariable()` then hands the result to the table function as a scalar:
+`SET VARIABLE` accepts the subquery, and `getvariable()` hands the result to the table function as a scalar:
 
 ```sql
 SET VARIABLE content = (SELECT content FROM read_text('dive.tsx'));
 SELECT id FROM MD_CREATE_DIVE(title = 'My Dive', content = getvariable('content'), api_version = 1);
 ```
 
-No heredocs, no dollar-quoting, no shell-escaping a 25 KB `.tsx`. This same pattern also applies when passing an ID you looked up: `MD_GET_DIVE(id = (SELECT ...))` fails, so resolve it into a variable first.
+No heredocs, no dollar-quoting, no shell-escaping a 25 KB `.tsx`. The same trick applies to **reads** — `MD_GET_DIVE(id = (SELECT ...))` fails too, so resolve the ID into a variable first.
 
-## Setup
+## 4. Deploy order is load-bearing
+
+**Flight → run it → Dives → Guides.**
+
+The `Agent Commerce Overview` Dive declares `md:agent_commerce_marts` in its `required_resources` — a database the Flight creates. Publish the Dive first and it references a table that doesn't exist yet, so `deploy.sh` waits for the Flight run to reach `RUN_STATUS_SUCCEEDED` before touching any Dive.
+
+That prefix matters: run statuses are `RUN_STATUS_SUCCEEDED` / `_FAILED` / `_CANCELLED`. Comparing against a bare `SUCCEEDED` is valid code that never matches, so a wait loop written that way hangs until timeout and then fails a run that actually succeeded.
+
+## 5. Reconcile, don't just create
+
+Setting a property at creation makes the repository the source of truth *once*. Checking it on every run makes it the source of truth *continuously*. The test: **if someone changed this in the UI, would the next deploy notice?**
+
+Guide visibility gets that treatment. `access` is declared per guide in the manifest and re-checked every run:
+
+```
+Updating guide 'Flight conventions' (de6cbaeb-…)...
+  access: organization -> user
+```
+
+This matters because the failure is silent and asymmetric — `organization` exposes a guide org-wide, nothing errors, and nobody is notified. A drifted title breaks loudly; a drifted access level just quietly leaks.
+
+Dive status (`MD_UPDATE_DIVE_STATUS`) is *not* reconciled here, so a Dive promoted to `endorsed` in the UI would persist unnoticed. Same shape of hole, deliberately left open — see the last section.
+
+## 6. Retry is safe for reads, never for creates
+
+The DuckDB CLI intermittently crashes (SIGSEGV / SIGABRT) partway through a MotherDuck session — observed on v1.5.4 at several different `MD_*` call sites, never reproducibly. A crash is not a SQL error, so it's worth retrying.
+
+But only where retrying is safe. `deploy.sh` splits into `md()` (retries) for reads and ID-keyed updates, and `md_once()` (does not) for creates:
+
+> If the server completes a `CREATE` and the client crashes before receiving the reply, a retry produces a **second artifact with a new ID**. That is not hypothetical — it created a duplicate Guide while this repository was being written, caught only by the duplicate-name guard.
+
+Creates fail the whole run instead, which is correct precisely because the script is idempotent: re-run it, and the next lookup finds what the crashed run created and takes the update path.
+
+## 7. Three sharp edges of name-based identity
+
+1. **Renaming creates a second artifact.** The lookup on the new name finds nothing, so the deployer creates and the old one is orphaned. This happened here: retitling `Agent commerce Dive style` to `Dive conventions` left an orphan in the `dives` topic that had to be deleted by hand.
+2. **Duplicate names fail the deploy** with a non-zero exit rather than guessing which to update. A Dive built by hand in the UI sharing a title will break CI.
+3. **`MD_LIST_*` is identity-scoped.** Deploy once under a personal token and again under a service account: the second run sees no match and creates duplicates. Using a dedicated service account in CI is a **correctness requirement, not hygiene** — it's what keeps the upsert idempotent.
+
+## 8. Organizing Guides with topics
+
+Guides deploy into a **topic tree**, because that's how an agent finds them without paying to load all of them. It calls `list_guides(topic)`, reads the topic names and counts, and opens only what looks relevant — progressive disclosure.
+
+```
+(root)                     MotherDuck as Code — orientation
+agent-commerce/            Agent commerce metrics
+platform-observability/    Usage monitoring with QUERY_HISTORY
+dives/                     Dive conventions            ← reserved topic
+flights/                   Flight conventions          ← reserved topic
+```
+
+- **The root is for the one guide always worth loading.** Untopiced guides appear in *every* overview, so they cost tokens every session. The orientation guide earns it by being a map — what lives where, which topic to open next — not a manual.
+- **Topic names are all an agent judges before opening.** `agent-commerce` and `platform-observability` say what they cover; `misc` would not.
+- **`dives` and `flights` are reserved** for Dive and Flight conventions, reached through their own entry points and excluded from the root overview.
+
+Topics nest with slashes and filter by prefix, so `agent-commerce` also returns `agent-commerce/forecasting`. Keep it shallow. Topics carry no identity — any number of guides can share one, and each guide is still addressed by its UUID.
+
+## 9. Where the client picks up what SQL can't do
+
+The `Flight Usage Monitoring` dive exists to show this. `MD_LIST_FLIGHT_RUNS` takes a literal and **rejects a lateral join** — *"only supports literals as parameters"* — so SQL cannot fan out across Flights on its own. The dive queries `MD_LIST_FLIGHTS()`, then assembles the `UNION ALL BY NAME` in JavaScript, one branch per flight ID. It generates exactly the SQL you'd hand-write, without the hand-editing.
+
+---
+
+# Running it
 
 ```bash
 export MOTHERDUCK_TOKEN='<your token>'   # the DuckDB CLI reads this env var
@@ -98,68 +157,36 @@ duckdb "md:" -f bootstrap.sql            # once: create the database and share
 
 For CI, add `MOTHERDUCK_TOKEN` as a GitHub Actions secret. Pull requests run `--dry-run` and post the plan to the job summary; merges to `main` apply.
 
-## Deploy order
-
-**Flight → run it → Dive → Guides.**
-
-This order is not cosmetic. The Dive's `required_resources` names `md:agent_commerce_marts`, a database the Flight creates. Publish the Dive first and it references a table that does not exist yet, so `deploy.sh` waits for the Flight's run to reach `RUN_STATUS_SUCCEEDED` before touching the Dive.
-
-## How identity works: create once, then update by ID
-
-There is no state file and no resource IDs committed to this repository. Every run asks MotherDuck what already exists, then branches:
-
-**First run** — nothing exists yet. The lookup returns no rows, so `deploy.sh` calls the *create* function and MotherDuck assigns an ID:
+**Pin the DuckDB CLI.** MotherDuck supports a specific maximum DuckDB version, and DuckDB releases ahead of it — so a workflow that installs "latest" is a time bomb that goes off the day a new DuckDB ships:
 
 ```
-lookup by name  ->  (no match)  ->  MD_CREATE_FLIGHT / MD_CREATE_DIVE / MD_CREATE_GUIDE
+Your DuckDB version (v1.5.5) is not yet supported by MotherDuck.
+The latest supported version is v1.5.4. Please downgrade to use MotherDuck.
 ```
 
-**Every run after that** — the lookup finds the artifact, and the deployer switches to the *update* functions, addressing it by the ID it just resolved:
+The workflow pins `DUCKDB_VERSION: "1.5.4"` and asserts it after install, so a mismatch fails with a clear message instead of a cryptic extension error. Two gotchas if you copy this: the installer reads the version from the `DUCKDB_VERSION` env var, and it only updates its `latest` symlink when the requested version *is* the latest — so pinning means putting `~/.duckdb/cli/<version>` on `PATH`, not `~/.duckdb/cli/latest`. Bump the pin only after MotherDuck announces support.
 
-```
-lookup by name  ->  id  ->  MD_UPDATE_FLIGHT(flight_id => id)
-                            MD_UPDATE_DIVE_CONTENT(id) + MD_UPDATE_DIVE_METADATA(id)
-                            MD_UPDATE_GUIDE(id)        + MD_UPDATE_GUIDE_METADATA(id)
-```
+### Copy-paste SQL
 
-So names are the *lookup* key and IDs are the *write* key. The name is what you version in Git; the ID never leaves MotherDuck. That is what makes the script idempotent — run it ten times and you get one of each artifact, not ten.
+Each monitoring dive ships a `queries.sql` beside it with the exact queries it runs, ready to paste straight into a MotherDuck notebook — no React, no repository required.
 
-| Artifact | Looked up by | Then written by |
-| --- | --- | --- |
-| Flight | `flight_name` via `MD_LIST_FLIGHTS()` | `flight_id` |
-| Dive | `title` via `MD_LIST_DIVES()` | `id` |
-| Guide | `title` + `topic` via `MD_LIST_GUIDES()` | `id` |
+| File | What it answers |
+| --- | --- |
+| [`dives/dive-usage-monitoring/queries.sql`](dives/dive-usage-monitoring/queries.sql) | Which Dives drive compute, on whose ducklings, from which surface |
+| [`dives/mcp-usage-monitoring/queries.sql`](dives/mcp-usage-monitoring/queries.sql) | Which MCP clients and users are querying, and how much |
+| [`dives/flight-usage-monitoring/queries.sql`](dives/flight-usage-monitoring/queries.sql) | Flight inventory and run health, plus a query that *generates* the fan-out query |
 
-`./deploy.sh --dry-run` shows you which branch each artifact will take before anything runs:
+These read only customer-accessible surfaces — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions — so they run in your own account unchanged. The first two need org admin on a Business plan; the Flight one is scoped to the calling identity.
 
-```
-ACTION   TYPE           NAME
-update   flight         agent-commerce-monthly-rollup
-update   dive           Agent Commerce Overview
-create   dive           Dive Usage Monitoring
-update   guide          Agent commerce metrics
-```
+Two attribution limits worth knowing before you rely on them:
 
-### Three sharp edges
+- **Dives** carry their ID in `user_agent`, so per-Dive attribution works. Compute follows the **viewer**, not the owner.
+- **Flights do not.** Flight connections appear as `md-flights` with no flight ID, so total Flight compute is available but per-Flight is not. Use run history instead.
 
-Resolving identity by name keeps the repository clean, but it has consequences worth knowing before you adopt the pattern:
+### About the data
 
-1. **Renaming a Dive's `title` creates a second Dive.** The lookup on the new title finds nothing, so the deployer creates. The old Dive is orphaned, not renamed.
-2. **Duplicate titles fail the deploy** with a non-zero exit rather than guessing which to update. A Dive you built by hand in the UI that happens to share a title will break CI.
-3. **`MD_LIST_DIVES()` is identity-scoped.** Deploy once under your personal token and again under a service account, and the second run sees no match — so it creates a duplicate instead of updating. Using a dedicated service account for CI is therefore a **correctness requirement, not hygiene**: it is what keeps the upsert idempotent.
+The dataset is a frozen 2024 snapshot, so **the weekly Flight recomputes an identical table every run**. It's here to demonstrate managing a Flight as code — scheduling, config, versioning, ordering — not incremental ingestion. `ACCESS UNRESTRICTED` shares are also region-scoped: a fork in a different cloud region should re-run `bootstrap.sql` against its own account.
 
-### Retry is not safe for creates
+### Deliberately left out
 
-The DuckDB CLI intermittently crashes (SIGSEGV / SIGABRT) partway through a MotherDuck session — seen on v1.5.4 at several different `MD_*` call sites, never reproducibly. `deploy.sh` retries crashed calls, but only for reads and for updates addressed by an existing ID.
-
-Creates deliberately do **not** retry. If the server completes a `CREATE` and the client crashes before receiving the reply, retrying produces a second artifact with a new ID. That is not hypothetical — it created a duplicate Guide while this repository was being written. Creates fail the run instead, which is safe because the script as a whole is idempotent: re-run it, and the next lookup finds the artifact the crashed run created and takes the update path.
-
-## About the data
-
-The dataset is a frozen snapshot covering 2024 only, so **the weekly Flight recomputes an identical table every run**. It is here to demonstrate managing a Flight as code — scheduling, config, versioning, ordering — not incremental ingestion. Do not read the schedule as evidence of freshness.
-
-`bootstrap.sql` copies four tables out of an upstream share into a database this account owns, then republishes it. `ACCESS UNRESTRICTED` shares are **region-scoped**: if you fork this and your organization is in a different cloud region, re-run `bootstrap.sql` against your own account rather than attaching the share URL in `manifest.json`.
-
-## Deliberately left out
-
-Branch-scoped preview resources, cleanup-on-branch-delete, RBAC roles and grants, manifest schema versioning and migrations, and Dive status reconciliation (`MD_UPDATE_DIVE_STATUS`). Each is a real need at scale and each is handled by [`motherduck-blueprints`](https://github.com/motherduckdb/motherduck-blueprints). They are omitted here because preview-name derivation and teardown is where most of that complexity lives, and it would bury the part worth learning.
+Branch-scoped preview resources, cleanup-on-branch-delete, RBAC roles and grants, manifest schema versioning and migrations, and Dive status reconciliation. Each is a real need at scale and each is handled by [`motherduck-blueprints`](https://github.com/motherduckdb/motherduck-blueprints). They're omitted here because preview-name derivation and teardown is where most of that complexity lives, and it would bury the part worth learning.

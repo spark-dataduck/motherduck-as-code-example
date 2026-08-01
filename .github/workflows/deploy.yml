@@ -9,17 +9,40 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pin the DuckDB CLI. MotherDuck supports a specific maximum DuckDB version
+  # and DuckDB releases ahead of it, so installing "latest" breaks the moment a
+  # new DuckDB ships:
+  #
+  #   Your DuckDB version (v1.5.5) is not yet supported by MotherDuck.
+  #   The latest supported version is v1.5.4. Please downgrade to use MotherDuck.
+  #
+  # Bump this only after MotherDuck announces support for the newer version.
+  DUCKDB_VERSION: "1.5.4"
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install DuckDB CLI
+      - name: Install DuckDB CLI (pinned)
         run: |
           set -euo pipefail
-          curl -fsSL https://install.duckdb.org | sh
-          echo "$HOME/.duckdb/cli/latest" >> "$GITHUB_PATH"
+          curl -fsSL https://install.duckdb.org | DUCKDB_VERSION="$DUCKDB_VERSION" sh
+          # The installer only updates the `latest` symlink when the requested
+          # version IS the latest, so add the version-specific directory.
+          echo "$HOME/.duckdb/cli/$DUCKDB_VERSION" >> "$GITHUB_PATH"
+
+      - name: Verify DuckDB version
+        run: |
+          set -euo pipefail
+          actual="$(duckdb --version | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          echo "duckdb --version -> $(duckdb --version)"
+          if [ "$actual" != "$DUCKDB_VERSION" ]; then
+            echo "::error::Expected DuckDB $DUCKDB_VERSION on PATH, found $actual." >&2
+            exit 1
+          fi
 
       # Pull requests plan only. Nothing is mutated until the change is merged.
       - name: Plan
