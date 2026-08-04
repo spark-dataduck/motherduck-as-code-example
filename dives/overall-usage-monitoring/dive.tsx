@@ -20,8 +20,8 @@
 // (transactions) is neither, so read% + write% falls a hair short of 100 — the
 // header states the residue rather than hiding it. Reads and writes are wildly
 // asymmetric — writes usually dominate query COUNT while reads dominate COMPUTE —
-// so both are carried as columns in "By workload" and as their own lines in
-// "Active hours", rather than in a separate read-only section.
+// so both are carried as columns in "By workload" and as the two bands of the
+// "Read vs write compute" chart, rather than in a separate read-only section.
 //
 // DRILL-DOWNS. Clicking a row in "By workload" or "Load patterns" expands the
 // identities behind it — and in the workload case, each identity's duckling
@@ -33,18 +33,18 @@
 // rendering every other band in a neutral ramp. Clicking a "By workload" row
 // moves both the accent and the drill-down.
 //
-// "Active hours" is the documented exception to that rule: it uses blue for write
-// compute and RED for read compute. The conventions guide otherwise reserves
-// red for direction (a decrease, an error), never for a category. Read-vs-write
-// is this dive's central dichotomy and the two lines share one axis, so they need
-// to be told apart at a glance; blue-vs-blueLight is not separable enough on a
-// dashed line. The exception is recorded in the conventions guide so the rule
-// stays honest rather than quietly broken.
+// "Read vs write compute" is the documented exception to that rule: blue for
+// write, RED for read. The conventions guide otherwise reserves red for direction
+// (a decrease, an error), never for a category. Read-vs-write is this dive's
+// central dichotomy and the two bands are stacked in one column, so they have to
+// be separable at a glance; blue against blueLight is not. The exception is
+// recorded in the conventions guide so the rule stays honest rather than quietly
+// broken.
 //
 // The same SQL, ready to paste into a notebook, is in queries.sql.
 
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 export const REQUIRED_DATABASES = [];
 
@@ -315,6 +315,7 @@ function Card({ title, note, right, children }: any) {
 export default function AccountUsageMonitoring() {
   const [days, setDays]     = useDiveState<string>("days", "30");
   const [metric, setMetric] = useDiveState<string>("metric", "exec_s");
+  const [rwMode, setRwMode] = useDiveState<string>("rw_mode", "abs");
 
   // One expanded row per section, doubling as the chart accent for workloads.
   const [focus, setFocus]         = useDiveState<string>("focus", "");
@@ -357,8 +358,12 @@ export default function AccountUsageMonitoring() {
       round(sum(epoch(wait_time)) FILTER (start_time <= now() - INTERVAL ${d} DAY), 1)      AS prev_queue_s,
       round(coalesce(sum(epoch(execution_time)) FILTER (query_type = 'QUERY'
                      AND start_time > now() - INTERVAL ${d} DAY), 0), 1)                    AS cur_read_s,
+      round(coalesce(sum(epoch(execution_time)) FILTER (query_type = 'QUERY'
+                     AND start_time <= now() - INTERVAL ${d} DAY), 0), 1)                   AS prev_read_s,
       round(coalesce(sum(epoch(execution_time)) FILTER (query_type IN ('DDL','DML')
                      AND start_time > now() - INTERVAL ${d} DAY), 0), 1)                    AS cur_write_s,
+      round(coalesce(sum(epoch(execution_time)) FILTER (query_type IN ('DDL','DML')
+                     AND start_time <= now() - INTERVAL ${d} DAY), 0), 1)                   AS prev_write_s,
       count(DISTINCT user_name) FILTER (start_time > now() - INTERVAL ${d} DAY)             AS cur_identities,
       count(DISTINCT duckling_id) FILTER (start_time > now() - INTERVAL ${d} DAY)           AS cur_ducklings,
       count(*) FILTER (error_message IS NOT NULL
@@ -490,33 +495,31 @@ export default function AccountUsageMonitoring() {
     ORDER BY exec_s DESC
   `, { enabled: ready });
 
-  // Hours of the day the account was doing anything, plus the read/write compute
-  // split behind it. active_hours counts DISTINCT hours, so it is
-  // timezone-independent — it reads as a schedule without knowing the cron.
-  const activity = useSQLQuery(`
+  // Daily read vs write compute. Same daily total as the workload chart above,
+  // split on an orthogonal axis: that chart says WHICH SURFACE, this one says
+  // WHICH KIND. On a date spine so a silent day plots as zero.
+  //
+  // TCL is neither a read nor a write, so these two bands can sit a hair under
+  // the workload chart's total. That gap is the residue named in the header.
+  const readWrite = useSQLQuery(`
     WITH spine AS (
       SELECT unnest(generate_series(
         date_trunc('day', now() - INTERVAL ${d} DAY)::TIMESTAMP,
         date_trunc('day', now())::TIMESTAMP, INTERVAL 1 DAY))::DATE AS day
     ),
     hits AS (
-      SELECT date_trunc('day', start_time)::DATE            AS day,
-             count(DISTINCT date_trunc('hour', start_time)) AS active_hours,
-             count(DISTINCT date_trunc('hour', start_time))
-               FILTER (query_type IN ('DDL', 'DML'))        AS write_hours,
+      SELECT date_trunc('day', start_time)::DATE AS day,
              round(coalesce(sum(epoch(execution_time))
-                   FILTER (query_type IN ('DDL', 'DML')), 0), 1)  AS write_s,
+                   FILTER (query_type = 'QUERY'), 0), 1)            AS read_s,
              round(coalesce(sum(epoch(execution_time))
-                   FILTER (query_type = 'QUERY'), 0), 1)          AS read_s
+                   FILTER (query_type IN ('DDL', 'DML')), 0), 1)    AS write_s
       FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
       WHERE start_time > now() - INTERVAL ${d} DAY
       GROUP BY 1
     )
     SELECT s.day::VARCHAR AS day,
-           coalesce(h.active_hours, 0) AS active_hours,
-           coalesce(h.write_hours, 0)  AS write_hours,
-           coalesce(h.write_s, 0)      AS write_s,
-           coalesce(h.read_s, 0)       AS read_s
+           coalesce(h.read_s, 0)  AS read_s,
+           coalesce(h.write_s, 0) AS write_s
     FROM spine s LEFT JOIN hits h USING (day)
     ORDER BY s.day
   `, { enabled: ready });
@@ -656,12 +659,20 @@ export default function AccountUsageMonitoring() {
     ? moverRows.reduce((a, b) => (Math.abs(b.delta_s) > Math.abs(a.delta_s) ? b : a))
     : null;
 
-  const actRows = rowsOf(activity.data).map((r) => ({
-    day: S(r.day).slice(5), active_hours: N(r.active_hours), write_hours: N(r.write_hours),
-    write_s: N(r.write_s), read_s: N(r.read_s),
-  }));
-  const maxHours = actRows.reduce((m, r) => Math.max(m, r.active_hours), 0);
-  const maxWriteHours = actRows.reduce((m, r) => Math.max(m, r.write_hours), 0);
+  // Share mode divides per day, so a quiet day still shows its mix rather than
+  // collapsing to a sliver.
+  const rwRows = rowsOf(readWrite.data).map((r) => {
+    const read = N(r.read_s), write = N(r.write_s), tot = read + write;
+    return {
+      day: S(r.day).slice(5), read_s: read, write_s: write,
+      read_pct: tot ? (100 * read) / tot : 0,
+      write_pct: tot ? (100 * write) / tot : 0,
+    };
+  });
+  const share = rwMode === "share";
+  const rwKeys = share
+    ? [{ k: "write_pct", name: "Write", color: C.blue }, { k: "read_pct", name: "Read", color: C.red }]
+    : [{ k: "write_s",   name: "Write", color: C.blue }, { k: "read_s",   name: "Read", color: C.red }];
 
   if (denied) {
     return (
@@ -856,42 +867,44 @@ export default function AccountUsageMonitoring() {
         />
       </Card>
 
-      <Card title="Active hours"
-            note="Distinct clock hours per day in which the account ran anything, with the read and write compute behind them. Because it counts distinct hours it is timezone-independent, and it reads as a schedule without knowing the cron: 1–2 active hours is a nightly batch, ~24 is something running continuously. The shape of the write line is the cost signal — write compute climbing while data volume is flat means a full refresh got rescheduled more often, which is the expensive version of the mistake.">
-        {probe.isLoading || activity.isLoading ? <Skel h={240} /> : (
+      <Card title="Read vs write compute"
+            note="The same daily total as the chart above, split on an orthogonal axis: that chart says which SURFACE the compute came from, this one says which KIND it was. Writes are the load side — the cost that tracks how often a pipeline runs. Reads are the consumption side — the cost that tracks who is querying. Switch to Share when you want the mix rather than the magnitude; a quiet day still shows its proportions there."
+            right={<Seg value={rwMode} onChange={setRwMode}
+                        options={[{ k: "abs", l: "Absolute" }, { k: "share", l: "Share" }]} />}>
+        {probe.isLoading || readWrite.isLoading ? <Skel h={240} /> : (
           <>
             <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={actRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <BarChart data={rwRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
                 <CartesianGrid stroke="#f1f3f4" vertical={false} />
                 <XAxis dataKey="day" tick={{ fill: C.muted, fontSize: 11 }}
                        axisLine={{ stroke: C.border }} tickLine={false} minTickGap={16} />
-                {/* Hours are bounded 0-24; compute is unbounded. Separate axes, or
-                    the hours line flattens onto the floor. */}
-                <YAxis yAxisId="h" domain={[0, 24]} ticks={[0, 6, 12, 18, 24]} width={40}
-                       tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
-                <YAxis yAxisId="s" orientation="right" width={56}
-                       tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false}
-                       tickFormatter={(v: number) => fmtSec(v)} />
+                <YAxis tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false}
+                       width={share ? 44 : 56} domain={share ? [0, 100] : undefined}
+                       tickFormatter={(v: number) => (share ? `${v}%` : fmtSec(v))} />
                 <Tooltip contentStyle={{ border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 12 }}
                          formatter={(v: any, n: any) =>
-                           (n === "Active hours" ? `${N(v)} of 24` : fmtSec(N(v)))} />
+                           [share ? `${N(v).toFixed(1)}%` : fmtSec(N(v)), n]} />
                 <Legend wrapperStyle={{ fontSize: 12, color: C.muted }} />
-                <Line yAxisId="h" type="stepAfter" dataKey="active_hours" name="Active hours"
-                      stroke={C.blue} strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line yAxisId="s" type="monotone" dataKey="write_s" name="Write compute"
-                      stroke={C.blue} strokeWidth={2} dot={false} isAnimationActive={false}
-                      strokeDasharray="4 3" />
-                <Line yAxisId="s" type="monotone" dataKey="read_s" name="Read compute"
-                      stroke={C.red} strokeWidth={2} dot={false} isAnimationActive={false}
-                      strokeDasharray="4 3" />
-              </LineChart>
+                {/* Write on the bottom of the stack: it is the series a load
+                    schedule change moves, so it should sit on a stable baseline. */}
+                {rwKeys.map((k) => (
+                  <Bar key={k.k} dataKey={k.k} name={k.name} stackId="rw"
+                       fill={k.color} isAnimationActive={false} />
+                ))}
+              </BarChart>
             </ResponsiveContainer>
-            <p style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>
-              Peak in this window: <strong style={{ color: C.text }}>{maxHours}</strong> of 24 hours
-              active, <strong style={{ color: C.text }}>{maxWriteHours}</strong> of them containing writes
-              {maxWriteHours >= 20 ? " — an hourly-or-finer write schedule."
-                : maxWriteHours <= 3 ? " — a batch write schedule." : "."}
-            </p>
+            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 10 }}>
+              <span style={{ fontSize: 12, color: C.muted }}>
+                <span style={{ color: C.red, fontWeight: 500 }}>Read</span>{" "}
+                <strong style={{ color: C.text }}>{fmtSec(N(k.cur_read_s))}</strong>{" "}
+                ({readPct.toFixed(1)}%) <Delta cur={N(k.cur_read_s)} prev={N(k.prev_read_s)} invert />
+              </span>
+              <span style={{ fontSize: 12, color: C.muted }}>
+                <span style={{ color: C.blue, fontWeight: 500 }}>Write</span>{" "}
+                <strong style={{ color: C.text }}>{fmtSec(N(k.cur_write_s))}</strong>{" "}
+                ({writePct.toFixed(1)}%) <Delta cur={N(k.cur_write_s)} prev={N(k.prev_write_s)} invert />
+              </span>
+            </div>
           </>
         )}
       </Card>
@@ -908,15 +921,10 @@ export default function AccountUsageMonitoring() {
         cross-region egress bill — useful for spotting which workload is data-heavy, not for
         reconciling an invoice.
         <br /><br />
-        <strong>Every table caps at {TOP_N} rows</strong> until “Show more”, and the cap applies
-        after sorting — so “top {TOP_N}” always tracks the column you sorted by. Drill-downs cap the
-        same way and say how many identities they are holding back.
-        <br /><br />
-        <strong>Ideas from here:</strong> once <em>External app / SDK</em> dominates, the next move is
-        not a query — it is giving each pipeline its own service account, which turns “By identity”
-        into a per-pipeline cost report. Or promote <em>Active hours</em> to a Flight that writes a
-        row when <code>active_hours</code> jumps, turning a monthly bill surprise into a next-morning
-        notification.
+        <strong>Ideas from here:</strong> <code>QUERY_HISTORY</code> is a rolling window, not an
+        archive — it cannot answer “how did this month compare to March”. A Flight that snapshots
+        these rollups into a table each morning turns this dive from a window into a trend, and it
+        is the one addition that unlocks questions none of the queries here can reach.
       </p>
     </div>
   );

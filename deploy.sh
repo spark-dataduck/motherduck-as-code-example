@@ -162,12 +162,16 @@ deploy_flight() {
 # --- dives ------------------------------------------------------------------
 deploy_dives() {
   local n; n=$(jq '.dives | length' "$MANIFEST")
-  local i title src desc req id preamble
+  local i title src desc req id preamble status cur_status cur_ver applies_ver
 
   for ((i = 0; i < n; i++)); do
     title=$(jq -r ".dives[$i].title"       "$MANIFEST")
     src=$(  jq -r ".dives[$i].source"      "$MANIFEST")
     desc=$( jq -r ".dives[$i].description" "$MANIFEST")
+    # Absent rather than defaulted on purpose: a Dive with no declared status is
+    # one the repository does not claim to own, so it is left alone entirely.
+    # Defaulting to 'draft' would silently demote a Dive someone endorsed.
+    status=$(jq -r ".dives[$i].status // empty" "$MANIFEST")
 
     # Build the required_resources list: [{'url': '...', 'alias': '...'}, ...].
     # Dives that only read MD_INFORMATION_SCHEMA or MD_LIST_* attach nothing,
@@ -200,6 +204,29 @@ deploy_dives() {
                                     api_version = 1, required_resources = [$req]);
         FROM MD_UPDATE_DIVE_METADATA(id = '$id'::UUID, title = '$title', description = '$desc');" >/dev/null
     fi
+
+    # Status is declared in the manifest, so reconcile it on every run — same
+    # reasoning as guide access: a Dive flipped back to 'draft' in the UI would
+    # otherwise stay that way and the repository would stop being the truth.
+    #
+    # The wrinkle is that a Dive's status is pinned to a VERSION.
+    # MD_UPDATE_DIVE_STATUS stamps one version, and MD_UPDATE_DIVE_CONTENT above
+    # bumps current_version — so on any run that changed content, the status is
+    # still 'ready' but describes the PREVIOUS version, which is not what is
+    # published. Hence the test covers both the status and the version it applies
+    # to; comparing only the status would leave every edit published as stale.
+    if [[ -n "$status" ]]; then
+      read -r cur_status cur_ver applies_ver <<<"$(sql1 "
+        SELECT coalesce(status, 'none') || ' ' || coalesce(current_version, 0)
+                                        || ' ' || coalesce(status_applies_to_version, 0)
+        FROM MD_LIST_DIVES() WHERE id = '$id';")"
+      if [[ "$cur_status" != "$status" || "$applies_ver" != "$cur_ver" ]]; then
+        echo "  status: ${cur_status}@v${applies_ver} -> ${status}@v${cur_ver}"
+        md -c "FROM MD_UPDATE_DIVE_STATUS(id = '$id'::UUID, status = '$status',
+                                          version = ${cur_ver});" >/dev/null
+      fi
+    fi
+
     echo "  https://app.motherduck.com/dives/$id"
   done
 }

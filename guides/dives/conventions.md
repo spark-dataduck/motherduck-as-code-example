@@ -119,11 +119,11 @@ indistinguishable from a mistake.
 overview, not a monitoring dashboard. Everything analytical in this account uses
 the light palette above.
 
-**`Overall Usage Monitoring` uses red for read compute** in its "Active hours"
-chart, against blue for write compute — the one place in this account where a
-semantic colour marks a category. Read-vs-write is that dive's central
-dichotomy, the two series share one axis, and `blue` vs `blueLight` is not
-separable enough on a dashed line at dashboard size. Treat this as licensed for
+**`Overall Usage Monitoring` uses red for read compute** in its "Read vs write
+compute" chart, against blue for write compute — the one place in this account
+where a semantic colour marks a category. Read-vs-write is that dive's central
+dichotomy and the two bands are stacked in one column, so they have to be
+separable at a glance; `blue` against `blueLight` is not. Treat this as licensed for
 a genuine two-way opposition carrying the dive's main argument, not as
 permission to colour categories generally: for three or more categories, or for
 categories that are merely different rather than opposed, use one accent against

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A worked example of managing MotherDuck resources as code: one Flight, four Dives, six Guides, and a share — all declared in `manifest.json` and reconciled by `deploy.sh`, which calls the `MD_*` SQL functions through the DuckDB CLI. There is no framework, no state file, and no committed resource IDs.
+A worked example of managing MotherDuck resources as code: one Flight, five Dives, six Guides, and a share — all declared in `manifest.json` and reconciled by `deploy.sh`, which calls the `MD_*` SQL functions through the DuckDB CLI. There is no framework, no state file, and no committed resource IDs.
 
 The artifacts are a vehicle; the repository's real subject is the deploy mechanics. Prose in `README.md` and the guides is part of the deliverable — keep it accurate when you change behavior.
 
@@ -76,7 +76,7 @@ This applies to reads too — resolve an ID into a variable before `MD_GET_DIVE`
 
 **`MD_LIST_FLIGHT_RUNS` accepts only literal arguments.** A lateral join over `MD_LIST_FLIGHTS()` is rejected, so SQL cannot fan out across Flights. Either `UNION ALL BY NAME` a branch per flight id (see `dives/flight-usage-monitoring/queries.sql`, which generates that SQL) or fan out in the client.
 
-**Reconcile, don't just create.** The test for any property: *if someone changed this in the UI, would the next deploy notice?* Guide `access` is re-checked every run because the failure is silent and asymmetric — a drifted title breaks loudly, a drifted access level quietly exposes a guide org-wide. Dive status (`MD_UPDATE_DIVE_STATUS`) is deliberately **not** reconciled; that hole is left open on purpose, so don't "fix" it without intent.
+**Reconcile, don't just create.** The test for any property: *if someone changed this in the UI, would the next deploy notice?* Guide `access` is re-checked every run because the failure is silent and asymmetric — a drifted title breaks loudly, a drifted access level quietly exposes a guide org-wide. Dive `status` is reconciled too, and it carries a wrinkle worth knowing: a status is pinned to a **version**, and `MD_UPDATE_DIVE_CONTENT` bumps `current_version`. So comparing only the status leaves every content edit published as a stale `ready` that describes the previous version. The check covers `status` *and* `status_applies_to_version`. A Dive with no `status` in the manifest is skipped entirely rather than defaulted — defaulting to `draft` would silently demote a Dive someone endorsed.
 
 ## Working on Dives
 

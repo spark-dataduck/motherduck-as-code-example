@@ -17,6 +17,7 @@
     {
       "title": "Agent Commerce Overview",
       "source": "dives/agent-commerce-overview/dive.tsx",
+      "status": "ready",
       "description": "Five interactive tabs over the agent-commerce dataset: revenue by tenant plan, monthly authorized spend, service performance by category, top agent buyers by GMV, and storefront readiness impact.",
       "required_resources": [
         {
@@ -32,24 +33,28 @@
     {
       "title": "Overall Usage Monitoring",
       "source": "dives/overall-usage-monitoring/dive.tsx",
+      "status": "ready",
       "description": "Account-wide compute from MD_INFORMATION_SCHEMA.QUERY_HISTORY, with every query classified into exactly one workload, attributed by identity, and split into full-refresh vs incremental load patterns. The entry point above the per-surface monitoring dives.",
       "required_resources": []
     },
     {
       "title": "Dive Usage Monitoring",
       "source": "dives/dive-usage-monitoring/dive.tsx",
+      "status": "ready",
       "description": "Compute attributed to Dives, split by viewing surface (MotherDuck UI, embedded, MCP app), from MD_INFORMATION_SCHEMA.QUERY_HISTORY joined to MD_LIST_DIVES.",
       "required_resources": []
     },
     {
       "title": "MCP Usage Monitoring",
       "source": "dives/mcp-usage-monitoring/dive.tsx",
+      "status": "ready",
       "description": "Queries reaching MotherDuck through the MCP server, broken down by calling client and user, from MD_INFORMATION_SCHEMA.QUERY_HISTORY.",
       "required_resources": []
     },
     {
       "title": "Flight Usage Monitoring",
       "source": "dives/flight-usage-monitoring/dive.tsx",
+      "status": "ready",
       "description": "Flight inventory and run health from MD_LIST_FLIGHTS and MD_LIST_FLIGHT_RUNS, fanning out across flights in the client because SQL cannot.",
       "required_resources": []
     }

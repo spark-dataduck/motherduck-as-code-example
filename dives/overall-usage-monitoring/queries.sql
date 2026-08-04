@@ -415,37 +415,47 @@ GROUP BY ALL
 ORDER BY exec_s DESC;
 
 
--- 8. Active hours: when was the account doing anything, and what kind? ---------
--- `active_hours` is the number of distinct clock hours in the day containing ANY
--- query; `write_hours` narrows that to hours containing a write. Either reads as
--- a schedule without needing to know the cron:
---   1-2   -> a nightly batch
---   ~24   -> something running continuously
+-- 8. Daily read vs write compute ----------------------------------------------
+-- The same daily total as query 4, split on an orthogonal axis: query 4 says
+-- which SURFACE the compute came from, this says which KIND it was.
 --
--- The cost signal is the SHAPE of write_s against flat data volume: write compute
--- climbing while the data does not means a full refresh got rescheduled more
--- often, which is the expensive version of the mistake.
+-- Writes are the load side — the cost that tracks how OFTEN a pipeline runs, so
+-- this is the series a schedule change moves. Reads are the consumption side —
+-- the cost that tracks who is querying. Watching which of the two is growing is
+-- the fastest way to decide whether to tune a pipeline or a dashboard.
 --
--- Timezone-independent by construction: it counts distinct hours, so it does not
--- matter which zone the session renders start_time in.
+-- TCL is neither, so read_s + write_s can sit a hair under query 4's total for
+-- the same day. That gap is the residue query 7 measures.
 --
--- The dive plots active_hours on a 0-24 left axis and write_s / read_s on a
--- right axis, because hours are bounded and compute is not.
-SELECT
-  date_trunc('day', start_time)::DATE                  AS day,
-  count(DISTINCT date_trunc('hour', start_time))       AS active_hours,
-  count(DISTINCT date_trunc('hour', start_time))
-    FILTER (query_type IN ('DDL', 'DML'))              AS write_hours,
-  round(coalesce(sum(epoch(execution_time))
-        FILTER (query_type IN ('DDL', 'DML')), 0), 1)  AS write_s,
-  round(coalesce(sum(epoch(execution_time))
-        FILTER (query_type = 'QUERY'), 0), 1)          AS read_s,
-  count(*)                                             AS queries,
-  count(DISTINCT user_name)                            AS identities
-FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
-WHERE start_time > now() - INTERVAL 30 DAY
-GROUP BY ALL
-ORDER BY day DESC;
+-- On a date spine, so a silent day plots as zero rather than vanishing.
+WITH spine AS (
+  SELECT unnest(generate_series(
+    date_trunc('day', now() - INTERVAL 30 DAY)::TIMESTAMP,
+    date_trunc('day', now())::TIMESTAMP, INTERVAL 1 DAY))::DATE AS day
+),
+hits AS (
+  SELECT date_trunc('day', start_time)::DATE AS day,
+         round(coalesce(sum(epoch(execution_time))
+               FILTER (query_type = 'QUERY'), 0), 1)         AS read_s,
+         round(coalesce(sum(epoch(execution_time))
+               FILTER (query_type IN ('DDL', 'DML')), 0), 1) AS write_s,
+         count(*) FILTER (query_type = 'QUERY')              AS read_queries,
+         count(*) FILTER (query_type IN ('DDL', 'DML'))      AS write_queries
+  FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+  WHERE start_time > now() - INTERVAL 30 DAY
+  GROUP BY 1
+)
+SELECT s.day,
+       coalesce(h.read_s, 0)         AS read_s,
+       coalesce(h.write_s, 0)        AS write_s,
+       coalesce(h.read_queries, 0)   AS read_queries,
+       coalesce(h.write_queries, 0)  AS write_queries,
+       -- the dive's "Share" toggle, computed per day so a quiet day still shows
+       -- its mix instead of collapsing to a sliver
+       round(100.0 * coalesce(h.read_s, 0)
+             / nullif(coalesce(h.read_s, 0) + coalesce(h.write_s, 0), 0), 1) AS read_pct
+FROM spine s LEFT JOIN hits h USING (day)
+ORDER BY s.day DESC;
 
 
 -- 9. Duckling busy seconds: how far is exec_s from billable uptime? -----------

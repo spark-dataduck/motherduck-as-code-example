@@ -19,7 +19,7 @@ The artifacts are just a vehicle. **What this repository is actually showing you
 
 ## 1. One manifest holds the desired state
 
-`manifest.json` is the only file you edit to change what deploys. It names every artifact, points at its source file, and declares the properties the repository owns — a Flight's schedule and config, a Dive's `required_resources`, a Guide's topic and visibility.
+`manifest.json` is the only file you edit to change what deploys. It names every artifact, points at its source file, and declares the properties the repository owns — a Flight's schedule and config, a Dive's `required_resources` and `status`, a Guide's topic and visibility.
 
 Everything else follows from it. `deploy.sh` reads the manifest, and nothing is hardcoded in the script that a user would reasonably want to change.
 
@@ -101,7 +101,14 @@ Updating guide 'Flight conventions' (de6cbaeb-…)...
 
 This matters because the failure is silent and asymmetric — `organization` exposes a guide org-wide, nothing errors, and nobody is notified. A drifted title breaks loudly; a drifted access level just quietly leaks.
 
-Dive status (`MD_UPDATE_DIVE_STATUS`) is *not* reconciled here, so a Dive promoted to `endorsed` in the UI would persist unnoticed. Same shape of hole, deliberately left open.
+Dive `status` gets it too, with a wrinkle: a status is pinned to a **version**, and updating a Dive's content bumps `current_version`. Checking only the status would leave every edit published as a `ready` that describes the *previous* version — so the test covers both:
+
+```
+Updating dive 'Overall Usage Monitoring' (bbeee0e7-…)...
+  status: ready@v1 -> ready@v2
+```
+
+A Dive with no `status` declared is skipped rather than defaulted, because defaulting to `draft` would silently demote a Dive someone had endorsed. Declaring nothing means claiming nothing.
 
 ## 6. Three sharp edges of name-based identity
 
