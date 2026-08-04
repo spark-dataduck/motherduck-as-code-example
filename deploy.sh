@@ -83,9 +83,10 @@ plan() {
   local name title topic id
   echo "ACTION   TYPE           NAME"
 
-  name=$(jq -r '.flights[0].name' "$MANIFEST")
-  id=$(lookup_flight "$name"); require_single "$id" "$name"
-  plan_line "$(action_for "$id")" flight "$name"
+  while IFS= read -r name; do
+    id=$(lookup_flight "$name"); require_single "$id" "$name"
+    plan_line "$(action_for "$id")" flight "$name"
+  done < <(jq -r '.flights[].name' "$MANIFEST")
 
   local nd; nd=$(jq '.dives | length' "$MANIFEST")
   for ((i = 0; i < nd; i++)); do
@@ -103,60 +104,77 @@ plan() {
   done
 }
 
-# --- flight -----------------------------------------------------------------
+# --- flights ----------------------------------------------------------------
 deploy_flight() {
-  local name src reqs cron cfg id
-  name=$(jq -r '.flights[0].name'          "$MANIFEST")
-  src=$( jq -r '.flights[0].source'        "$MANIFEST")
-  reqs=$(jq -r '.flights[0].requirements'  "$MANIFEST")
-  cron=$(jq -r '.flights[0].schedule_cron' "$MANIFEST")
+  local count i name src reqs cron cfg secrets run_on_deploy id
+  count=$(jq -r '.flights | length' "$MANIFEST")
 
-  # Build a DuckDB MAP literal from the config object: MAP { 'K': 'V', ... }
-  cfg=$(jq -r --arg q "'" '.flights[0].config | to_entries
-        | map($q + .key + $q + ": " + $q + .value + $q) | join(", ")' "$MANIFEST")
+  for (( i = 0; i < count; i++ )); do
+    name=$(jq -r ".flights[$i].name"          "$MANIFEST")
+    src=$( jq -r ".flights[$i].source"        "$MANIFEST")
+    reqs=$(jq -r ".flights[$i].requirements"  "$MANIFEST")
+    cron=$(jq -r ".flights[$i].schedule_cron" "$MANIFEST")
+    run_on_deploy=$(jq -r ".flights[$i].run_on_deploy // true" "$MANIFEST")
 
-  id=$(lookup_flight "$name"); require_single "$id" "$name"
+    # Build a DuckDB MAP literal from the config object: MAP { 'K': 'V', ... }
+    cfg=$(jq -r --arg q "'" ".flights[$i].config | to_entries
+          | map(\$q + .key + \$q + \": \" + \$q + .value + \$q) | join(\", \")" "$MANIFEST")
 
-  # SET VARIABLE is the only way to get file contents into a table function:
-  # read_text() cannot be an argument, and neither can a subquery.
-  local preamble="
-    SET VARIABLE source_code      = (SELECT content FROM read_text('$src'));
-    SET VARIABLE requirements_txt = (SELECT content FROM read_text('$reqs'));"
-  local args="
-    name              => '$name',
-    source_code       => getvariable('source_code'),
-    requirements_txt  => getvariable('requirements_txt'),
-    schedule_cron     => '$cron',
-    config            => MAP { $cfg }"
+    # LIST(VARCHAR) literal: ['a', 'b']. Empty string means omit the argument.
+    secrets=$(jq -r --arg q "'" ".flights[$i].secrets // [] |
+          if length == 0 then \"\"
+          else \"[\" + (map(\$q + . + \$q) | join(\", \")) + \"]\" end" "$MANIFEST")
 
-  if [[ -z "$id" ]]; then
-    echo "Creating flight '$name'..."
-    md_once -c "$preamble FROM MD_CREATE_FLIGHT($args);" >/dev/null
-    id=$(lookup_flight "$name")
-  else
-    echo "Updating flight '$name' ($id)..."
-    md -c "$preamble FROM MD_UPDATE_FLIGHT(flight_id => '$id'::UUID, $args);" >/dev/null
-  fi
+    id=$(lookup_flight "$name"); require_single "$id" "$name"
 
-  echo "Running flight '$name'..."
-  md -c "FROM MD_RUN_FLIGHT(flight_id => '$id'::UUID);" >/dev/null
+    # SET VARIABLE is the only way to get file contents into a table function:
+    # read_text() cannot be an argument, and neither can a subquery.
+    local preamble="
+      SET VARIABLE source_code      = (SELECT content FROM read_text('$src'));
+      SET VARIABLE requirements_txt = (SELECT content FROM read_text('$reqs'));"
+    local args="
+      name              => '$name',
+      source_code       => getvariable('source_code'),
+      requirements_txt  => getvariable('requirements_txt'),
+      schedule_cron     => '$cron',
+      config            => MAP { $cfg }"
+    [[ -n "$secrets" ]] && args="$args,
+      flight_secret_names => $secrets"
 
-  # Wait for the run to finish. The Dive published next reads the table it writes.
-  # Statuses are prefixed: RUN_STATUS_SUCCEEDED / _FAILED / _CANCELLED.
-  local status=""
-  for _ in $(seq 1 60); do
-    status=$(sql1 "SELECT status FROM MD_LIST_FLIGHT_RUNS(flight_id => '$id'::UUID) ORDER BY run_number DESC LIMIT 1;")
-    case "$status" in
-      RUN_STATUS_SUCCEEDED|RUN_STATUS_FAILED|RUN_STATUS_CANCELLED) break ;;
-    esac
-    sleep 5
+    if [[ -z "$id" ]]; then
+      echo "Creating flight '$name'..."
+      md_once -c "$preamble FROM MD_CREATE_FLIGHT($args);" >/dev/null
+      id=$(lookup_flight "$name")
+    else
+      echo "Updating flight '$name' ($id)..."
+      md -c "$preamble FROM MD_UPDATE_FLIGHT(flight_id => '$id'::UUID, $args);" >/dev/null
+    fi
+
+    if [[ "$run_on_deploy" != "true" ]]; then
+      echo "  Skipping run for '$name' (run_on_deploy=false)."
+      continue
+    fi
+
+    echo "Running flight '$name'..."
+    md -c "FROM MD_RUN_FLIGHT(flight_id => '$id'::UUID);" >/dev/null
+
+    # Wait for the run to finish. The Dive published next reads the table it writes.
+    # Statuses are prefixed: RUN_STATUS_SUCCEEDED / _FAILED / _CANCELLED.
+    local status=""
+    for _ in $(seq 1 60); do
+      status=$(sql1 "SELECT status FROM MD_LIST_FLIGHT_RUNS(flight_id => '$id'::UUID) ORDER BY run_number DESC LIMIT 1;")
+      case "$status" in
+        RUN_STATUS_SUCCEEDED|RUN_STATUS_FAILED|RUN_STATUS_CANCELLED) break ;;
+      esac
+      sleep 5
+    done
+    if [[ "$status" != "RUN_STATUS_SUCCEEDED" ]]; then
+      echo "ERROR: flight run finished with status '${status:-unknown}'." >&2
+      md -c "SELECT logs FROM MD_GET_FLIGHT_LOGS(flight_id => '$id'::UUID, run_number => (SELECT max(run_number) FROM MD_LIST_FLIGHT_RUNS(flight_id => '$id'::UUID)));" >&2 || true
+      exit 1
+    fi
+    echo "  Flight run succeeded."
   done
-  if [[ "$status" != "RUN_STATUS_SUCCEEDED" ]]; then
-    echo "ERROR: flight run finished with status '${status:-unknown}'." >&2
-    md -c "SELECT logs FROM MD_GET_FLIGHT_LOGS(flight_id => '$id'::UUID, run_number => (SELECT max(run_number) FROM MD_LIST_FLIGHT_RUNS(flight_id => '$id'::UUID)));" >&2 || true
-    exit 1
-  fi
-  echo "  Flight run succeeded."
 }
 
 # --- dives ------------------------------------------------------------------
