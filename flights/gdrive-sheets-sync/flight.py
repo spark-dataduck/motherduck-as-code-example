@@ -94,3 +94,134 @@ def detect_collisions(
     for item in items:
         seen.setdefault((item.schema, item.table), []).append(item.source_ref)
     return {key: refs for key, refs in seen.items() if len(refs) > 1}
+
+
+# --- discovery --------------------------------------------------------------
+
+import fnmatch
+
+SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+def discover(
+    list_children,
+    list_tabs,
+    root_folders: list[tuple[str, str]],
+    exclude_folder_ids: set[str],
+    exclude_patterns: list[str],
+) -> tuple[list[PlannedItem], list[str]]:
+    """Walk each root folder depth-first and expand every native Sheet's tabs.
+
+    list_children(folder_id) -> [{"id", "name", "mimeType"}, ...]
+    list_tabs(file_id)       -> ["Tab name", ...]
+    root_folders             -> [(folder_id, display_name), ...]
+
+    Returns (planned_items, warnings). Anything that is not a native Google
+    Sheet produces a warning rather than a silent skip.
+    """
+    planned: list[PlannedItem] = []
+    warnings: list[str] = []
+
+    # stack entries are (folder_id, path_parts)
+    stack = [
+        (fid, [name]) for fid, name in root_folders if fid not in exclude_folder_ids
+    ]
+
+    while stack:
+        folder_id, path_parts = stack.pop()
+        for child in list_children(folder_id):
+            name, mime, cid = child["name"], child["mimeType"], child["id"]
+
+            if mime == FOLDER_MIME:
+                if cid in exclude_folder_ids:
+                    warnings.append(f"excluded folder: {'/'.join(path_parts)}/{name}")
+                    continue
+                stack.append((cid, path_parts + [name]))
+                continue
+
+            if mime != SHEET_MIME:
+                warnings.append(
+                    f"{'/'.join(path_parts)}/{name} is not a native Google Sheet "
+                    f"(mimeType={mime}); skipped"
+                )
+                continue
+
+            if any(fnmatch.fnmatch(name, pat) for pat in exclude_patterns):
+                warnings.append(f"excluded by pattern: {'/'.join(path_parts)}/{name}")
+                continue
+
+            tabs = list_tabs(cid)
+            if not tabs:
+                warnings.append(f"{'/'.join(path_parts)}/{name} has no readable tabs")
+                continue
+
+            schema = resolve_schema(path_parts)
+            for tab in tabs:
+                planned.append(
+                    PlannedItem(
+                        schema=schema,
+                        table=resolve_table(name, tab),
+                        source_ref=f"{'/'.join(path_parts)}/{name}[{tab}]",
+                        file_id=cid,
+                        tab=tab,
+                    )
+                )
+
+    return planned, warnings
+
+
+def drive_lister(service):
+    """Adapt the Drive client to list_children(folder_id).
+
+    supportsAllDrives/includeItemsFromAllDrives are required because service
+    accounts have zero Drive storage quota, so source folders commonly live in
+    a Shared Drive rather than being owned by the service account.
+    """
+
+    def list_children(folder_id: str) -> list[dict]:
+        out: list[dict] = []
+        page_token = None
+        while True:
+            resp = (
+                service.files()
+                .list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    fields="nextPageToken, files(id, name, mimeType)",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            out.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                return out
+
+    return list_children
+
+
+def sheets_tab_lister(service):
+    """Adapt the Sheets client to list_tabs(file_id)."""
+
+    def list_tabs(file_id: str) -> list[str]:
+        meta = (
+            service.spreadsheets()
+            .get(spreadsheetId=file_id, fields="sheets.properties.title")
+            .execute()
+        )
+        return [s["properties"]["title"] for s in meta.get("sheets", [])]
+
+    return list_tabs
+
+
+def folder_name(service, folder_id: str) -> str:
+    """Resolve a root folder's own name, which becomes the top path segment."""
+    meta = (
+        service.files()
+        .get(fileId=folder_id, fields="name", supportsAllDrives=True)
+        .execute()
+    )
+    return meta["name"]
