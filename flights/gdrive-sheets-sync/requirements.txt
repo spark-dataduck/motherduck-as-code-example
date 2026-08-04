@@ -1,0 +1,4 @@
+# duckdb is provided by the MotherDuck Flight runtime.
+google-api-python-client==2.149.0
+google-auth==2.35.0
+tenacity==9.0.0
