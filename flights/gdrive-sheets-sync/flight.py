@@ -229,3 +229,227 @@ def folder_name(service, folder_id: str) -> str:
         .execute()
     )
     return meta["name"]
+
+
+# --- SQL helpers ------------------------------------------------------------
+
+import json
+import os
+import uuid
+from datetime import datetime, timezone
+
+# NOTE: duckdb, google-*, and tenacity are imported INSIDE main(), not here.
+# The test suite loads this file with importlib.exec_module to reach the pure
+# helpers, so a third-party import at module scope would force CI to install the
+# Flight's full runtime dependencies just to unit-test slugify().
+
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+]
+
+SYNC_LOG_COLUMNS = [
+    "run_id", "source_ref", "target_ref", "rows", "attempts",
+    "status", "error", "started_at", "finished_at",
+]
+
+
+def quote_ident(ident: str) -> str:
+    return '"' + ident.replace('"', '""') + '"'
+
+
+def sql_str(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"sql_str() requires a string, got {type(value).__name__}")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def build_read_sql(item: PlannedItem, all_varchar: bool) -> str:
+    args = [sql_str(item.file_id), f"sheet={sql_str(item.tab)}"]
+    if all_varchar:
+        args.append("all_varchar=true")
+    return f"SELECT * FROM read_gsheet({', '.join(args)})"
+
+
+def _env_json(key: str, default):
+    raw = os.environ.get(key, "").strip()
+    return json.loads(raw) if raw else default
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    return os.environ.get(key, str(default)).strip().lower() in ("1", "true", "yes")
+
+
+# --- main -------------------------------------------------------------------
+
+def main() -> None:
+    # Imported here, not at module scope, so unit tests can load this file
+    # without the Flight's runtime dependencies installed.
+    import duckdb
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from tenacity import (
+        Retrying,
+        stop_after_attempt,
+        wait_exponential,
+        wait_random,
+    )
+
+    root_ids = _env_json("ROOT_FOLDER_IDS", [])
+    if not root_ids:
+        raise RuntimeError("ROOT_FOLDER_IDS config is required")
+
+    target_db = os.environ.get("TARGET_DATABASE", "google_drive")
+    exclude_folder_ids = set(_env_json("EXCLUDE_FOLDER_IDS", []))
+    exclude_patterns = _env_json("EXCLUDE_PATTERNS", [])
+    all_varchar = _env_bool("ALL_VARCHAR", True)
+    discover_only = _env_bool("DISCOVER_ONLY", False)
+    fail_on_collision = _env_bool("FAIL_ON_COLLISION", True)
+    max_retries = int(os.environ.get("MAX_RETRIES", "5"))
+    retry_base = float(os.environ.get("RETRY_BASE_SECONDS", "2"))
+
+    key_json = os.environ.get("gsheets_SERVICE_ACCOUNT_JSON", "")
+    if not key_json:
+        raise RuntimeError(
+            "gsheets_SERVICE_ACCOUNT_JSON is missing; attach the 'gsheets' Flight secret"
+        )
+    key = json.loads(key_json)
+    creds = service_account.Credentials.from_service_account_info(key, scopes=SCOPES)
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+    sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    # A root folder that was never shared with the service account is invisible.
+    # Warn per root and carry on; do not fail the run over one misconfigured id.
+    roots: list[tuple[str, str]] = []
+    root_warnings: list[str] = []
+    for fid in root_ids:
+        try:
+            roots.append((fid, folder_name(drive, fid)))
+        except Exception as exc:  # noqa: BLE001 - one bad root must not stop the rest
+            root_warnings.append(
+                f"root folder {fid} is unreadable ({exc}); is it shared with "
+                f"{key['client_email']}?"
+            )
+    if not roots:
+        for warning in root_warnings:
+            print(f"WARNING: {warning}")
+        raise RuntimeError("no readable root folders; nothing to discover")
+
+    planned, warnings = discover(
+        drive_lister(drive),
+        sheets_tab_lister(sheets),
+        roots,
+        exclude_folder_ids,
+        exclude_patterns,
+    )
+    for warning in root_warnings + warnings:
+        print(f"WARNING: {warning}")
+
+    collisions = detect_collisions(planned)
+    if collisions:
+        for (schema, table), refs in collisions.items():
+            print(f"COLLISION: {schema}.{table} <- {', '.join(refs)}")
+        if fail_on_collision:
+            raise RuntimeError(
+                f"{len(collisions)} table-name collision(s); nothing was loaded"
+            )
+
+    print(f"Resolved {len(planned)} table(s) across {len(roots)} root folder(s):")
+    for item in planned:
+        print(f"  {target_db}.{item.schema}.{item.table}  <-  {item.source_ref}")
+
+    if discover_only:
+        print("DISCOVER_ONLY=true; nothing written")
+        return
+
+    con = duckdb.connect("md:")
+    con.execute("INSTALL gsheets FROM community")
+    con.execute("LOAD gsheets")
+    con.execute(
+        f"CREATE OR REPLACE SECRET gsheet_auth "
+        f"(TYPE gsheet, PROVIDER key_file, EMAIL {sql_str(key['client_email'])}, "
+        f"SECRET {sql_str(key['private_key'])})"
+    )
+    con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(target_db)}")
+    log_table = f"{quote_ident(target_db)}.main.gsheets_sync_log"
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS {log_table} ("
+        "run_id VARCHAR, source_ref VARCHAR, target_ref VARCHAR, rows BIGINT, "
+        "attempts INTEGER, status VARCHAR, error VARCHAR, "
+        "started_at TIMESTAMP, finished_at TIMESTAMP)"
+    )
+
+    run_id = str(uuid.uuid4())
+    for schema in sorted({item.schema for item in planned}):
+        con.execute(
+            f"CREATE SCHEMA IF NOT EXISTS {quote_ident(target_db)}.{quote_ident(schema)}"
+        )
+
+    failures = 0
+    for item in planned:
+        target_ref = (
+            f"{quote_ident(target_db)}.{quote_ident(item.schema)}.{quote_ident(item.table)}"
+        )
+        started = datetime.now(timezone.utc)
+        attempts = 0
+
+        def job():
+            nonlocal attempts
+            attempts += 1
+            con.execute(
+                f"CREATE OR REPLACE TABLE {target_ref} AS "
+                f"{build_read_sql(item, all_varchar)}"
+            )
+            return con.execute(f"SELECT count(*) FROM {target_ref}").fetchone()[0]
+
+        retryer = Retrying(
+            stop=stop_after_attempt(max_retries),
+            wait=wait_exponential(multiplier=retry_base, max=60) + wait_random(0, 1),
+            reraise=True,
+        )
+        try:
+            rows = retryer(job)
+            status, error = "ok", None
+            print(f"OK   {item.source_ref} -> {target_ref} ({rows} rows)")
+        except Exception as exc:  # noqa: BLE001 - one bad sheet must not stop the rest
+            rows, status, error = None, "failed", str(exc)[:2000]
+            failures += 1
+            print(f"FAIL {item.source_ref}: {error}")
+
+        con.execute(
+            f"INSERT INTO {log_table} ({', '.join(SYNC_LOG_COLUMNS)}) "
+            f"VALUES ({', '.join('?' * len(SYNC_LOG_COLUMNS))})",
+            [
+                run_id, item.source_ref, target_ref, rows, attempts,
+                status, error, started, datetime.now(timezone.utc),
+            ],
+        )
+
+    _warn_orphans(con, target_db, planned)
+
+    print(f"Done: {len(planned) - failures} succeeded, {failures} failed")
+    if failures:
+        raise SystemExit(1)
+
+
+def _warn_orphans(con, target_db: str, planned: list[PlannedItem]) -> None:
+    """Warn about tables in the database that discovery did not find.
+
+    Names are the key, so a Drive rename creates a new table and leaves the old
+    one stale. Warn only — never drop, because these are customer data tables.
+    """
+    existing = con.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        "WHERE table_catalog = ? AND table_name <> 'gsheets_sync_log'",
+        [target_db],
+    ).fetchall()
+    expected = {(item.schema, item.table) for item in planned}
+    for schema, table in sorted(set(existing) - expected):
+        print(
+            f"WARNING: orphan table {target_db}.{schema}.{table} was not found in "
+            "Drive this run (renamed or deleted?); not dropped"
+        )
+
+
+if __name__ == "__main__":
+    main()
