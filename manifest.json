@@ -16,15 +16,16 @@
       "name": "gdrive-sheets-sync",
       "source": "flights/gdrive-sheets-sync/flight.py",
       "requirements": "flights/gdrive-sheets-sync/requirements.txt",
+      "schedule_cron": "40 6 * * *",
       "run_on_deploy": false,
       "secrets": ["gsheets"],
       "config": {
-        "ROOT_FOLDER_IDS": "[]",
+        "ROOT_FOLDER_IDS": "[\"1kxGh4Be7XDaJqLX22IZuV-sezOTQWM-f\"]",
         "TARGET_DATABASE": "google_drive",
         "EXCLUDE_FOLDER_IDS": "[]",
         "EXCLUDE_PATTERNS": "[]",
         "ALL_VARCHAR": "true",
-        "DISCOVER_ONLY": "true",
+        "DISCOVER_ONLY": "false",
         "FAIL_ON_COLLISION": "true",
         "MAX_ATTEMPTS": "5",
         "RETRY_BASE_SECONDS": "2"
