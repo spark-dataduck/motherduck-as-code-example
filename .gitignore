@@ -1,3 +1,7 @@
 .env
 .DS_Store
 *.tmp.tsx
+
+# Python bytecode caches, e.g. from running pytest.
+__pycache__/
+*.pyc

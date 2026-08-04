@@ -57,6 +57,8 @@ def prefixed(slug: str, kind: str) -> str:
     Prefix 'd' for a schema and 't' for a table, so a mangled name still says
     which level it came from.
     """
+    if not slug:
+        raise ValueError("slug must not be empty")
     if slug[0].isdigit():
         return ("d" if kind == "schema" else "t") + slug
     return slug
@@ -66,7 +68,12 @@ def resolve_schema(folder_path: list[str]) -> str:
     """Schema = underscore-joined relative path from the configured root.
 
     MotherDuck has exactly db.schema.table, so nesting flattens into the name.
+    An empty folder_path is a caller bug, not a data condition: the root
+    folder's own name is always the first path segment, so any real sheet
+    resolves a non-empty path. Fail loudly rather than inventing a schema.
     """
+    if not folder_path:
+        raise ValueError("folder_path must not be empty")
     return prefixed("_".join(slugify(part) for part in folder_path), "schema")
 
 

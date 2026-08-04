@@ -46,6 +46,16 @@ def test_resolve_table_always_appends_tab():
     assert mod.resolve_table("Campaigns", "List1") == "campaigns_list1"
 
 
+def test_resolve_schema_rejects_empty_folder_path():
+    with pytest.raises(ValueError):
+        mod.resolve_schema([])
+
+
+def test_prefixed_rejects_empty_slug():
+    with pytest.raises(ValueError):
+        mod.prefixed("", "schema")
+
+
 def test_detect_collisions_reports_only_duplicates():
     items = [
         mod.PlannedItem("finance", "budget_q1", "Finance/Budget[Q1]", "id1", "Q1"),
