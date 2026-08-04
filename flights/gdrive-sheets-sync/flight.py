@@ -166,7 +166,7 @@ def discover(
                     PlannedItem(
                         schema=schema,
                         table=resolve_table(name, tab),
-                        source_ref=f"{'/'.join(path_parts)}/{name}[{tab}]",
+                        source_ref=f"{path}/{name}[{tab}]",
                         file_id=cid,
                         tab=tab,
                     )
