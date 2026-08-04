@@ -114,7 +114,7 @@ deploy_flight() {
     src=$( jq -r ".flights[$i].source"        "$MANIFEST")
     reqs=$(jq -r ".flights[$i].requirements"  "$MANIFEST")
     cron=$(jq -r ".flights[$i].schedule_cron" "$MANIFEST")
-    run_on_deploy=$(jq -r ".flights[$i].run_on_deploy // true" "$MANIFEST")
+    run_on_deploy=$(jq -r ".flights[$i] | if has(\"run_on_deploy\") then .run_on_deploy else true end" "$MANIFEST")
 
     # Build a DuckDB MAP literal from the config object: MAP { 'K': 'V', ... }
     cfg=$(jq -r --arg q "'" ".flights[$i].config | to_entries
