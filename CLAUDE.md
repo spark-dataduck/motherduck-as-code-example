@@ -20,7 +20,7 @@ Unit tests cover the pure helpers in `flights/gdrive-sheets-sync/flight.py`
 (naming, slugification, SQL quoting). CI runs them before deploying.
 
 ```bash
-pip install -r requirements-dev.txt
+pip install pytest==8.3.3
 python -m pytest tests/ -v
 ```
 
@@ -29,9 +29,15 @@ The DuckDB CLI and `jq` are the only dependencies, and `MOTHERDUCK_TOKEN` must b
 ```bash
 ./deploy.sh --dry-run          # print the create/update plan, mutate nothing
 ./deploy.sh                    # apply (CI does this; see below)
-duckdb "md:" -f bootstrap.sql  # one-time: own a copy of the source data + publish the share
 MANIFEST=other.json ./deploy.sh --dry-run   # manifest path is overridable
 ```
+
+**Source data for `agent-commerce-monthly-rollup`.** `manifest.json` points at the
+public `agent_commerce` share, which needs no setup. If you fork this into an
+organization in a **different cloud region**, that share cannot be attached —
+shares are region-scoped — so own a copy first (`ATTACH` the share, `CREATE
+DATABASE`, `COPY FROM DATABASE`, then `CREATE SHARE`) and put your own share URL
+in the manifest.
 
 **Do not run `./deploy.sh` locally.** Deployment happens through CI: a pull request runs `--dry-run` into the job summary, and a merge to `main` applies. A local apply competes with CI for the same name-keyed artifacts. Use `--dry-run` freely — it only reads.
 

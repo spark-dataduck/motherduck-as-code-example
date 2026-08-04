@@ -10,7 +10,11 @@ Config (surfaced as environment variables by the Flight runtime):
   EXCLUDE_FOLDER_IDS  JSON array of folder IDs to skip              (default: [])
   EXCLUDE_PATTERNS    JSON array of fnmatch patterns on file names  (default: [])
   ALL_VARCHAR         land every column as VARCHAR                  (default: true)
-  DISCOVER_ONLY       print the resolved plan and write nothing     (default: false)
+  DISCOVER_ONLY       true  = walk Drive, resolve every table name, print the
+                              plan, then return BEFORE connecting to MotherDuck.
+                              No database, no tables, no audit rows, and no
+                              MotherDuck compute is used at all.
+                      false = load every discovered tab              (default: false)
   FAIL_ON_COLLISION   abort before loading if two items collide     (default: true)
   MAX_ATTEMPTS        per-item total attempts (not "retries")       (default: 5)
   RETRY_BASE_SECONDS  exponential-backoff multiplier                (default: 2)
