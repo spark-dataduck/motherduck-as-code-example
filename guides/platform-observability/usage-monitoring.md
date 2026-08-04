@@ -152,7 +152,7 @@ from uptime in both directions:
   each accrue their own wall-clock `execution_time` against one billed second.
 
 Merging overlapping `[start_time, end_time)` intervals per `duckling_id`
-(gaps-and-islands; query 8 in `dives/account-usage-monitoring/queries.sql`)
+(gaps-and-islands; query 9 in `dives/account-usage-monitoring/queries.sql`)
 measures the second effect for a given account. A `concurrency_factor` near 1.0
 means queries run sequentially and `exec_s` is a fair proxy; well above 1.0 means
 `exec_s` overstates billed compute and the merged figure should be used instead.

@@ -12,14 +12,25 @@
 // exec_s is ATTRIBUTION, NOT A BILL. MotherDuck bills duckling uptime per second.
 // execution_time under-counts it (a duckling stays warm between queries) and can
 // over-count it (concurrent queries on one duckling each accrue wall-clock time
-// against one billed second). Query 8 in queries.sql quantifies the second effect
+// against one billed second). Query 9 in queries.sql quantifies the second effect
 // for a given account. The billing portal is the authority on money; this dive
 // finds the workload that moved.
 //
+// READ / WRITE SPLIT. Reads are query_type = 'QUERY'; writes are DDL + DML. TCL
+// (transactions) is neither, so read% + write% falls a hair short of 100 — the
+// header states the residue rather than hiding it. Reads and writes are wildly
+// asymmetric: writes usually dominate query COUNT while reads dominate COMPUTE,
+// which is why they get separate sections instead of one table with a filter.
+//
+// DRILL-DOWNS. Clicking a row in "By workload", "Load patterns", or "Read
+// compute" expands the identities behind it — and in the workload case, each
+// identity's duckling instance sizes. All of it is filtered client-side from data
+// already fetched; clicking never issues a query.
+//
 // PALETTE NOTE: the stacked chart honours the one-accent rule from
 // guides/dives/conventions.md by giving the SELECTED workload the blue and
-// rendering every other band in a neutral ramp. Click a row in "By workload" to
-// move the accent. No second hue is introduced.
+// rendering every other band in a neutral ramp. Clicking a "By workload" row
+// moves both the accent and the drill-down. No second hue is introduced.
 //
 // The same SQL, ready to paste into a notebook, is in queries.sql.
 
@@ -36,6 +47,8 @@ const C = {
 // Neutral ramp for the non-highlighted bands. Darkest first, so the largest
 // remaining workload still reads as the strongest neutral.
 const RAMP = ["#80868b", "#9aa0a6", "#bdc1c6", "#dadce0", "#e8eaed", "#f1f3f4"];
+
+const TOP_N = 10;   // every table caps here until "Show more"
 
 type Rows = Record<string, unknown>[];
 const rowsOf = (d: unknown): Rows => (Array.isArray(d) ? (d as Rows) : []);
@@ -87,6 +100,23 @@ const NORM = `upper(trim(regexp_replace(
         '--[^\\n]*', ' ', 'g'),
       '\\s+', ' ', 'g'), ' ;'))`;
 
+const LOAD_PATTERN = `CASE
+        WHEN t LIKE 'CREATE OR REPLACE TABLE%'                                  THEN 'Full refresh (CREATE OR REPLACE)'
+        WHEN t LIKE 'TRUNCATE%'                                                 THEN 'Full refresh (TRUNCATE + reload)'
+        WHEN t LIKE 'CREATE TABLE%AS SELECT%' OR t LIKE 'CREATE TABLE%AS WITH%' THEN 'Full load (CTAS)'
+        WHEN t LIKE 'INSERT INTO%SELECT%'                                       THEN 'Append from query (INSERT..SELECT)'
+        WHEN t LIKE 'WITH %' AND t LIKE '%INSERT INTO%'                         THEN 'Append from query (INSERT..SELECT)'
+        WHEN t LIKE 'INSERT INTO%'                                              THEN 'Append literal (INSERT..VALUES)'
+        WHEN t LIKE 'MERGE INTO%'                                               THEN 'Incremental merge (MERGE)'
+        WHEN t LIKE 'UPDATE %'                                                  THEN 'UPDATE'
+        WHEN t LIKE 'DELETE FROM%'                                              THEN 'DELETE'
+        WHEN t LIKE 'COPY %'                                                    THEN 'COPY'
+        WHEN t LIKE 'CREATE%VIEW%'                                              THEN 'View definition'
+        WHEN t LIKE 'CREATE TABLE%' OR t LIKE 'CREATE%SCHEMA%'                  THEN 'Create empty table/schema'
+        WHEN t LIKE 'DROP %' OR t LIKE 'ALTER %' OR t LIKE 'COMMENT ON%'        THEN 'DROP / ALTER / COMMENT'
+        ELSE 'Unclassified'
+      END`;
+
 function Skel({ h, w }: { h: number; w?: string }) {
   return <div className="bg-gray-200 animate-pulse rounded" style={{ height: h, width: w || "100%" }} />;
 }
@@ -119,7 +149,59 @@ function Scorecard({ label, value, loading, delta, tone, first }: any) {
   );
 }
 
-function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty, onRowClick, activeRow }: any) {
+// The drill-down table rendered underneath an expanded row. Deliberately not
+// sortable — it is already a focused subset, and a second sort control inside a
+// row reads as noise.
+function Detail({ label, cols, rows, empty, limit, expanded, onToggle }: any) {
+  const capped = limit && !expanded ? rows.slice(0, limit) : rows;
+  const hidden = rows.length - capped.length;
+  return (
+    <div style={{ padding: "12px 0 16px 18px", borderLeft: `2px solid ${C.blue}`, margin: "2px 0 6px" }}>
+      <p style={{ color: C.muted, fontSize: 11, fontWeight: 500, textTransform: "uppercase",
+                  letterSpacing: "0.3px", marginBottom: 8 }}>{label}</p>
+      {!rows.length ? <p style={{ color: C.muted, fontSize: 12 }}>{empty}</p> : (
+        <>
+          <table style={{ color: C.text, fontSize: 12, borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {cols.map((c: any, i: number) => (
+                  <th key={c.key} className={c.num ? "text-right" : "text-left"}
+                      style={{ color: C.muted, fontSize: 10, fontWeight: 500, textTransform: "uppercase",
+                               letterSpacing: "0.3px", paddingBottom: 6, whiteSpace: "nowrap",
+                               paddingRight: i === cols.length - 1 ? 0 : 22 }}>{c.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {capped.map((r: any, ri: number) => (
+                <tr key={ri}>
+                  {cols.map((c: any, i: number) => (
+                    <td key={c.key} className={"py-1 " + (c.num ? "text-right tabular-nums" : "text-left")}
+                        style={{ whiteSpace: "nowrap", color: c.tone ? c.tone(r[c.key]) : undefined,
+                                 paddingRight: i === cols.length - 1 ? 0 : 22 }}>
+                      {c.fmt ? c.fmt(r[c.key]) : r[c.key]}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {limit && (hidden > 0 || expanded) && (
+            <button onClick={onToggle}
+              style={{ marginTop: 8, background: "none", border: "none", color: C.blue,
+                       fontSize: 12, cursor: "pointer", padding: 0 }}>
+              {expanded ? "Show fewer identities" : `Show ${hidden} more ${hidden === 1 ? "identity" : "identities"}`}
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Sorts client-side over rows already fetched — never re-queries to re-sort.
+function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty, limit, expanded, onToggle,
+                     onRowClick, activeRow, renderDetail }: any) {
   if (loading) return <Skel h={160} />;
   if (!rows.length) return <p style={{ color: C.muted, fontSize: 13, padding: "16px 0" }}>{empty}</p>;
   const sorted = [...rows].sort((a: any, b: any) => {
@@ -127,6 +209,10 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty, onRowClic
     const c = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y));
     return dir === "asc" ? c : -c;
   });
+  // Cap applies AFTER sorting, so "top 10" tracks whichever column is sorted.
+  const capped = limit && !expanded ? sorted.slice(0, limit) : sorted;
+  const hidden = sorted.length - capped.length;
+  const keyOf = (r: any) => r[cols[0].key];
   return (
     <div style={{ overflowX: "auto" }}>
       <table className="w-full" style={{ color: C.text, fontSize: 13, borderCollapse: "collapse" }}>
@@ -144,11 +230,14 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty, onRowClic
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r: any, ri: number) => {
-            const active = activeRow != null && activeRow === r[cols[0].key];
-            return (
-              <tr key={ri} onClick={onRowClick ? () => onRowClick(r[cols[0].key]) : undefined}
-                  style={{ borderBottom: "1px solid #f1f3f4", cursor: onRowClick ? "pointer" : undefined,
+          {/* flatMap rather than a Fragment so each <tr> carries its own key
+              without importing anything from react. */}
+          {capped.flatMap((r: any, ri: number) => {
+            const active = activeRow != null && activeRow !== "" && activeRow === keyOf(r);
+            const out = [
+              <tr key={`r${ri}`} onClick={onRowClick ? () => onRowClick(keyOf(r)) : undefined}
+                  style={{ borderBottom: active ? "none" : "1px solid #f1f3f4",
+                           cursor: onRowClick ? "pointer" : undefined,
                            background: active ? "#e8f0fe" : undefined }}
                   className={active ? "" : "hover:bg-gray-50"}>
                 {cols.map((c: any, i: number) => (
@@ -157,14 +246,30 @@ function SortTable({ cols, rows, loading, sortKey, dir, onSort, empty, onRowClic
                                color: c.tone ? c.tone(r[c.key]) : (active && i === 0 ? C.blue : undefined),
                                fontWeight: active && i === 0 ? 500 : undefined,
                                paddingRight: i === cols.length - 1 ? 0 : 24 }}>
-                    {c.fmt ? c.fmt(r[c.key]) : r[c.key]}
+                    {onRowClick && i === 0 ? `${active ? "▾" : "▸"} ${c.fmt ? c.fmt(r[c.key]) : r[c.key]}`
+                                           : (c.fmt ? c.fmt(r[c.key]) : r[c.key])}
                   </td>
                 ))}
-              </tr>
-            );
+              </tr>,
+            ];
+            if (active && renderDetail) {
+              out.push(
+                <tr key={`d${ri}`} style={{ borderBottom: "1px solid #f1f3f4", background: "#f8f9fa" }}>
+                  <td colSpan={cols.length} style={{ padding: 0 }}>{renderDetail(r)}</td>
+                </tr>
+              );
+            }
+            return out;
           })}
         </tbody>
       </table>
+      {limit && (hidden > 0 || expanded) && (
+        <button onClick={onToggle}
+          style={{ marginTop: 12, background: "none", border: "none", color: C.blue,
+                   fontSize: 13, cursor: "pointer", padding: 0 }}>
+          {expanded ? "Show less" : `Show ${hidden} more`}
+        </button>
+      )}
     </div>
   );
 }
@@ -199,15 +304,30 @@ function Card({ title, note, right, children }: any) {
 }
 
 export default function AccountUsageMonitoring() {
-  const [days, setDays]       = useDiveState<string>("days", "30");
-  const [metric, setMetric]   = useDiveState<string>("metric", "exec_s");
-  const [focus, setFocus]     = useDiveState<string>("focus", "");
-  const [wSort, setWSort]     = useDiveState<string>("w_sort", "exec_s");
-  const [wDir, setWDir]       = useDiveState<string>("w_dir", "desc");
-  const [iSort, setISort]     = useDiveState<string>("i_sort", "exec_s");
-  const [iDir, setIDir]       = useDiveState<string>("i_dir", "desc");
-  const [lSort, setLSort]     = useDiveState<string>("l_sort", "exec_s");
-  const [lDir, setLDir]       = useDiveState<string>("l_dir", "desc");
+  const [days, setDays]     = useDiveState<string>("days", "30");
+  const [metric, setMetric] = useDiveState<string>("metric", "exec_s");
+
+  // One expanded row per section, doubling as the chart accent for workloads.
+  const [focus, setFocus]         = useDiveState<string>("focus", "");
+  const [patFocus, setPatFocus]   = useDiveState<string>("pat_focus", "");
+  const [readFocus, setReadFocus] = useDiveState<string>("read_focus", "");
+
+  const [wSort, setWSort] = useDiveState<string>("w_sort", "exec_s");
+  const [wDir, setWDir]   = useDiveState<string>("w_dir", "desc");
+  const [iSort, setISort] = useDiveState<string>("i_sort", "exec_s");
+  const [iDir, setIDir]   = useDiveState<string>("i_dir", "desc");
+  const [lSort, setLSort] = useDiveState<string>("l_sort", "exec_s");
+  const [lDir, setLDir]   = useDiveState<string>("l_dir", "desc");
+  const [rSort, setRSort] = useDiveState<string>("r_sort", "exec_s");
+  const [rDir, setRDir]   = useDiveState<string>("r_dir", "desc");
+
+  const [wAll, setWAll] = useDiveState<boolean>("w_all", false);
+  const [iAll, setIAll] = useDiveState<boolean>("i_all", false);
+  const [lAll, setLAll] = useDiveState<boolean>("l_all", false);
+  const [rAll, setRAll] = useDiveState<boolean>("r_all", false);
+  const [wDetailAll, setWDetailAll] = useDiveState<boolean>("w_detail_all", false);
+  const [lDetailAll, setLDetailAll] = useDiveState<boolean>("l_detail_all", false);
+  const [rDetailAll, setRDetailAll] = useDiveState<boolean>("r_detail_all", false);
 
   const d = Number(days) || 30;
 
@@ -231,6 +351,10 @@ export default function AccountUsageMonitoring() {
       round(sum(epoch(execution_time)) FILTER (start_time <= now() - INTERVAL ${d} DAY), 1) AS prev_exec_s,
       round(sum(epoch(wait_time)) FILTER (start_time > now() - INTERVAL ${d} DAY), 1)       AS cur_queue_s,
       round(sum(epoch(wait_time)) FILTER (start_time <= now() - INTERVAL ${d} DAY), 1)      AS prev_queue_s,
+      round(coalesce(sum(epoch(execution_time)) FILTER (query_type = 'QUERY'
+                     AND start_time > now() - INTERVAL ${d} DAY), 0), 1)                    AS cur_read_s,
+      round(coalesce(sum(epoch(execution_time)) FILTER (query_type IN ('DDL','DML')
+                     AND start_time > now() - INTERVAL ${d} DAY), 0), 1)                    AS cur_write_s,
       count(DISTINCT user_name) FILTER (start_time > now() - INTERVAL ${d} DAY)             AS cur_identities,
       count(DISTINCT duckling_id) FILTER (start_time > now() - INTERVAL ${d} DAY)           AS cur_ducklings,
       count(*) FILTER (error_message IS NOT NULL
@@ -247,12 +371,37 @@ export default function AccountUsageMonitoring() {
            round(sum(epoch(execution_time)), 1)               AS exec_s,
            round(100.0 * sum(epoch(execution_time))
                  / sum(sum(epoch(execution_time))) OVER (), 1) AS pct_exec,
+           round(coalesce(sum(epoch(execution_time)) FILTER (query_type = 'QUERY'), 0), 1)        AS read_s,
+           round(coalesce(sum(epoch(execution_time)) FILTER (query_type IN ('DDL','DML')), 0), 1) AS write_s,
            round(sum(epoch(wait_time)), 1)                    AS queue_s,
            count(DISTINCT user_name)                          AS identities,
            count(DISTINCT duckling_id)                        AS ducklings,
            round(sum(bytes_uploaded + bytes_downloaded) / 1e9, 2) AS gb_moved,
            count(*) FILTER (error_message IS NOT NULL)        AS errors,
            strftime(max(start_time), '%Y-%m-%d %H:%M')        AS last_active
+    FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+    WHERE start_time > now() - INTERVAL ${d} DAY
+    GROUP BY ALL
+    ORDER BY exec_s DESC
+  `, { enabled: ready });
+
+  // Drill-down source for BOTH "By workload" and "Read compute", at
+  // workload x identity x instance_type grain. Small by construction (~125 rows
+  // over 90 days in a busy org), so the client filters and rolls it up rather
+  // than re-querying on every click.
+  const wkIdentity = useSQLQuery(`
+    SELECT ${WORKLOAD}                              AS workload,
+           user_name,
+           instance_type,
+           count(DISTINCT duckling_id)              AS ducklings,
+           count(*)                                 AS queries,
+           round(sum(epoch(execution_time)), 1)     AS exec_s,
+           round(coalesce(sum(epoch(execution_time)) FILTER (query_type = 'QUERY'), 0), 1)        AS read_s,
+           round(coalesce(sum(epoch(execution_time)) FILTER (query_type IN ('DDL','DML')), 0), 1) AS write_s,
+           count(*) FILTER (query_type = 'QUERY')          AS read_queries,
+           count(*) FILTER (query_type IN ('DDL','DML'))   AS write_queries,
+           round(sum(epoch(wait_time)), 1)          AS queue_s,
+           strftime(max(start_time), '%Y-%m-%d %H:%M') AS last_active
     FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
     WHERE start_time > now() - INTERVAL ${d} DAY
     GROUP BY ALL
@@ -275,7 +424,6 @@ export default function AccountUsageMonitoring() {
     WHERE start_time > now() - INTERVAL ${d} DAY
     GROUP BY ALL
     ORDER BY exec_s DESC
-    LIMIT 100
   `, { enabled: ready });
 
   // A date spine keeps quiet days visible as zeroes. A workload STOPPING is as
@@ -317,44 +465,51 @@ export default function AccountUsageMonitoring() {
     ORDER BY delta_s DESC
   `, { enabled: ready });
 
-  // Writes only. This is the most expensive query in the dive — it reads
-  // query_text for every DDL/DML row in the window.
-  const loads = useSQLQuery(`
+  // Writes only, at load_pattern x identity grain. This is the most expensive
+  // query in the dive — it reads query_text for every DDL/DML row — so it is run
+  // ONCE at the finer grain and rolled up to pattern level in the client, rather
+  // than paying for a second scan to get the parent rows.
+  const loadsByIdentity = useSQLQuery(`
     WITH w AS (
-      SELECT ${NORM} AS t, execution_time, user_name
+      SELECT ${NORM} AS t, execution_time, user_name, start_time
       FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
       WHERE start_time > now() - INTERVAL ${d} DAY
         AND query_type IN ('DDL', 'DML')
     )
-    SELECT
-      CASE
-        WHEN t LIKE 'CREATE OR REPLACE TABLE%'                                  THEN 'Full refresh (CREATE OR REPLACE)'
-        WHEN t LIKE 'TRUNCATE%'                                                 THEN 'Full refresh (TRUNCATE + reload)'
-        WHEN t LIKE 'CREATE TABLE%AS SELECT%' OR t LIKE 'CREATE TABLE%AS WITH%' THEN 'Full load (CTAS)'
-        WHEN t LIKE 'INSERT INTO%SELECT%'                                       THEN 'Append from query (INSERT..SELECT)'
-        WHEN t LIKE 'WITH %' AND t LIKE '%INSERT INTO%'                         THEN 'Append from query (INSERT..SELECT)'
-        WHEN t LIKE 'INSERT INTO%'                                              THEN 'Append literal (INSERT..VALUES)'
-        WHEN t LIKE 'MERGE INTO%'                                               THEN 'Incremental merge (MERGE)'
-        WHEN t LIKE 'UPDATE %'                                                  THEN 'UPDATE'
-        WHEN t LIKE 'DELETE FROM%'                                              THEN 'DELETE'
-        WHEN t LIKE 'COPY %'                                                    THEN 'COPY'
-        WHEN t LIKE 'CREATE%VIEW%'                                              THEN 'View definition'
-        WHEN t LIKE 'CREATE TABLE%' OR t LIKE 'CREATE%SCHEMA%'                  THEN 'Create empty table/schema'
-        WHEN t LIKE 'DROP %' OR t LIKE 'ALTER %' OR t LIKE 'COMMENT ON%'        THEN 'DROP / ALTER / COMMENT'
-        ELSE 'Unclassified'
-      END                                                 AS load_pattern,
-      count(*)                                            AS queries,
-      round(sum(epoch(execution_time)), 1)                AS exec_s,
-      round(100.0 * sum(epoch(execution_time))
-            / sum(sum(epoch(execution_time))) OVER (), 1) AS pct_write_exec,
-      count(DISTINCT user_name)                           AS identities
+    SELECT ${LOAD_PATTERN}                          AS load_pattern,
+           user_name,
+           count(*)                                 AS queries,
+           round(sum(epoch(execution_time)), 1)     AS exec_s,
+           strftime(max(start_time), '%Y-%m-%d %H:%M') AS last_active
     FROM w
     GROUP BY ALL
     ORDER BY exec_s DESC
   `, { enabled: ready });
 
-  // active_hours reads as a schedule without knowing the cron: 1-2 is nightly,
-  // ~24 is hourly. Counting DISTINCT hours makes it timezone-independent.
+  // Reads only (query_type = 'QUERY'), by workload. p95 and spill are computed
+  // here at workload grain rather than derived from wkIdentity, because neither
+  // a quantile nor a distinct count rolls up correctly from a finer grain.
+  const readsByWorkload = useSQLQuery(`
+    SELECT ${WORKLOAD}                                        AS workload,
+           count(*)                                           AS queries,
+           round(sum(epoch(execution_time)), 1)               AS exec_s,
+           round(100.0 * sum(epoch(execution_time))
+                 / sum(sum(epoch(execution_time))) OVER (), 1) AS pct_read_exec,
+           round(quantile_cont(epoch(execution_time), 0.95), 2) AS p95_s,
+           round(sum(epoch(wait_time)), 1)                    AS queue_s,
+           count(DISTINCT user_name)                          AS identities,
+           count(DISTINCT duckling_id)                        AS ducklings,
+           round(sum(bytes_downloaded) / 1e9, 2)              AS gb_downloaded,
+           round(sum(bytes_spilled_to_disk) / 1e9, 2)         AS gb_spilled,
+           count(*) FILTER (error_message IS NOT NULL)        AS errors,
+           strftime(max(start_time), '%Y-%m-%d %H:%M')        AS last_active
+    FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
+    WHERE start_time > now() - INTERVAL ${d} DAY
+      AND query_type = 'QUERY'
+    GROUP BY ALL
+    ORDER BY exec_s DESC
+  `, { enabled: ready });
+
   const cadence = useSQLQuery(`
     WITH spine AS (
       SELECT unnest(generate_series(
@@ -382,15 +537,99 @@ export default function AccountUsageMonitoring() {
   const k = rowsOf(kpi.data)[0] ?? {};
   const loading = probe.isLoading || kpi.isLoading;
   const errPct = N(k.cur_queries) ? (100 * N(k.cur_errors)) / N(k.cur_queries) : 0;
+  const totalExec = N(k.cur_exec_s);
+  const readPct = totalExec ? (100 * N(k.cur_read_s)) / totalExec : 0;
+  const writePct = totalExec ? (100 * N(k.cur_write_s)) / totalExec : 0;
+  const otherPct = Math.max(0, 100 - readPct - writePct);
 
   const wRows = rowsOf(byWorkload.data).map((r) => ({
     workload: S(r.workload), queries: N(r.queries), exec_s: N(r.exec_s), pct_exec: N(r.pct_exec),
-    queue_s: N(r.queue_s), identities: N(r.identities), ducklings: N(r.ducklings),
-    gb_moved: N(r.gb_moved), errors: N(r.errors), last_active: S(r.last_active),
+    read_s: N(r.read_s), write_s: N(r.write_s), queue_s: N(r.queue_s), identities: N(r.identities),
+    ducklings: N(r.ducklings), gb_moved: N(r.gb_moved), errors: N(r.errors), last_active: S(r.last_active),
   }));
 
-  // Stack order: largest workload at the bottom. The focused workload takes the
-  // accent; everything else walks the neutral ramp.
+  // --- drill-down rollups, all client-side over already-fetched rows ---------
+
+  const wkiRows = rowsOf(wkIdentity.data).map((r) => ({
+    workload: S(r.workload), user_name: S(r.user_name), instance_type: S(r.instance_type),
+    ducklings: N(r.ducklings), queries: N(r.queries), exec_s: N(r.exec_s),
+    read_s: N(r.read_s), write_s: N(r.write_s),
+    read_queries: N(r.read_queries), write_queries: N(r.write_queries),
+    queue_s: N(r.queue_s), last_active: S(r.last_active),
+  }));
+
+  // "Standard×2, Jumbo×1" — biggest fleet first. Summing per-instance-type
+  // duckling counts is exact unless a duckling was resized mid-window, in which
+  // case one duckling can appear under two sizes.
+  const sizeLabel = (parts: { instance_type: string; ducklings: number }[]) =>
+    parts.filter((p) => p.instance_type)
+         .sort((a, b) => b.ducklings - a.ducklings)
+         .map((p) => `${p.instance_type}×${p.ducklings}`)
+         .join(", ") || "—";
+
+  const identitiesFor = (workload: string, kind: "all" | "read") => {
+    const m = new Map<string, any>();
+    for (const r of wkiRows) {
+      if (r.workload !== workload) continue;
+      if (kind === "read" && r.read_queries === 0) continue;
+      let e = m.get(r.user_name);
+      if (!e) {
+        e = { user_name: r.user_name, exec_s: 0, read_s: 0, write_s: 0, read_queries: 0,
+              write_queries: 0, queue_s: 0, ducklings: 0, parts: [] as any[], last_active: "" };
+        m.set(r.user_name, e);
+      }
+      e.exec_s += r.exec_s; e.read_s += r.read_s; e.write_s += r.write_s;
+      e.read_queries += r.read_queries; e.write_queries += r.write_queries;
+      e.queue_s += r.queue_s; e.ducklings += r.ducklings;
+      e.parts.push({ instance_type: r.instance_type, ducklings: r.ducklings });
+      if (r.last_active > e.last_active) e.last_active = r.last_active;
+    }
+    return [...m.values()]
+      .map((e) => ({ ...e, sizes: sizeLabel(e.parts) }))
+      .sort((a, b) => (kind === "read" ? b.read_s - a.read_s : b.exec_s - a.exec_s));
+  };
+
+  const loadIdRows = rowsOf(loadsByIdentity.data).map((r) => ({
+    load_pattern: S(r.load_pattern), user_name: S(r.user_name),
+    queries: N(r.queries), exec_s: N(r.exec_s), last_active: S(r.last_active),
+  }));
+
+  // Roll the fine grain up to pattern level. Safe to derive: sums add, and the
+  // identity count is an exact distinct count over the rows in hand.
+  const lRows = (() => {
+    const m = new Map<string, any>();
+    let total = 0;
+    for (const r of loadIdRows) {
+      total += r.exec_s;
+      let e = m.get(r.load_pattern);
+      if (!e) {
+        e = { load_pattern: r.load_pattern, queries: 0, exec_s: 0, identities: 0,
+              ids: new Set<string>(), last_active: "" };
+        m.set(r.load_pattern, e);
+      }
+      e.queries += r.queries; e.exec_s += r.exec_s; e.ids.add(r.user_name);
+      if (r.last_active > e.last_active) e.last_active = r.last_active;
+    }
+    return [...m.values()].map((e) => ({
+      load_pattern: e.load_pattern, queries: e.queries, exec_s: e.exec_s,
+      pct_write_exec: total ? (100 * e.exec_s) / total : 0,
+      identities: e.ids.size, last_active: e.last_active,
+    }));
+  })();
+
+  const identitiesForPattern = (p: string) =>
+    loadIdRows.filter((r) => r.load_pattern === p).sort((a, b) => b.exec_s - a.exec_s);
+
+  const rRows = rowsOf(readsByWorkload.data).map((r) => ({
+    workload: S(r.workload), queries: N(r.queries), exec_s: N(r.exec_s),
+    pct_read_exec: N(r.pct_read_exec), p95_s: N(r.p95_s), queue_s: N(r.queue_s),
+    identities: N(r.identities), ducklings: N(r.ducklings), gb_downloaded: N(r.gb_downloaded),
+    gb_spilled: N(r.gb_spilled), errors: N(r.errors), last_active: S(r.last_active),
+  }));
+
+  // --- chart ----------------------------------------------------------------
+
+  // Stack order: largest workload at the bottom.
   const stackOrder = (() => {
     const tot = new Map<string, number>();
     for (const r of rowsOf(daily.data)) {
@@ -469,18 +708,28 @@ export default function AccountUsageMonitoring() {
       </div>
 
       <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, padding: 20, marginTop: 20, display: "flex", gap: 20, flexWrap: "wrap" }}>
-        <Scorecard first label="Compute (attributed)" loading={loading} value={fmtSec(N(k.cur_exec_s))}
-                   delta={<Delta cur={N(k.cur_exec_s)} prev={N(k.prev_exec_s)} invert />} />
+        <Scorecard first label="Compute (attributed)" loading={loading} value={fmtSec(totalExec)}
+                   delta={<Delta cur={totalExec} prev={N(k.prev_exec_s)} invert />} />
+        <Scorecard label="Read compute" loading={loading} value={fmtSec(N(k.cur_read_s))}
+                   delta={<span style={{ color: C.muted, fontSize: 12 }}>{readPct.toFixed(1)}% of total</span>} />
+        <Scorecard label="Write compute" loading={loading} value={fmtSec(N(k.cur_write_s))}
+                   delta={<span style={{ color: C.muted, fontSize: 12 }}>{writePct.toFixed(1)}% of total</span>} />
         <Scorecard label="Queries" loading={loading} value={fmtNum(N(k.cur_queries))}
                    delta={<Delta cur={N(k.cur_queries)} prev={N(k.prev_queries)} invert />} />
         <Scorecard label="Queue time" loading={loading} value={fmtSec(N(k.cur_queue_s))}
                    delta={<Delta cur={N(k.cur_queue_s)} prev={N(k.prev_queue_s)} invert />} />
         <Scorecard label="Identities" loading={loading} value={String(N(k.cur_identities))} />
         <Scorecard label="Ducklings" loading={loading} value={String(N(k.cur_ducklings))} />
-        <Scorecard label="Data moved" loading={loading} value={fmtGb(N(k.cur_gb_moved))} />
         <Scorecard label="Error rate" loading={loading} value={`${errPct.toFixed(1)}%`}
                    tone={errPct > 5 ? C.red : undefined} />
       </div>
+
+      {!loading && otherPct > 0.05 && (
+        <p style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>
+          Read and write shares leave {otherPct.toFixed(1)}% unaccounted — that is <code>TCL</code>
+          {" "}(transaction control) and other statement types, which are neither reads nor writes.
+        </p>
+      )}
 
       {topMover && Math.abs(topMover.delta_s) > 1 && (
         <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderLeft: `3px solid ${topMover.delta_s > 0 ? C.red : C.green}`,
@@ -518,12 +767,14 @@ export default function AccountUsageMonitoring() {
       </Card>
 
       <Card title="By workload"
-            note="Click a row to move the chart accent onto that workload. Sorting happens in the browser — no extra query.">
+            note="Click a row to expand the identities behind it — with each identity's duckling instance sizes — and to move the chart accent. Sorting and expanding both happen in the browser; neither issues a query.">
         <SortTable
           cols={[
             { key: "workload",    label: "Workload" },
             { key: "exec_s",      label: "Compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
             { key: "pct_exec",    label: "Share", num: true, fmt: (v: any) => `${N(v).toFixed(1)}%` },
+            { key: "read_s",      label: "Read", num: true, fmt: (v: any) => fmtSec(N(v)) },
+            { key: "write_s",     label: "Write", num: true, fmt: (v: any) => fmtSec(N(v)) },
             { key: "queries",     label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
             { key: "queue_s",     label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
             { key: "identities",  label: "Identities", num: true },
@@ -536,8 +787,27 @@ export default function AccountUsageMonitoring() {
           loading={probe.isLoading || byWorkload.isLoading}
           sortKey={wSort} dir={wDir}
           onSort={sortToggle(wSort, setWSort, wDir, setWDir)}
-          onRowClick={(w: string) => setFocus(focus === w ? "" : w)}
-          activeRow={focus || null}
+          limit={TOP_N} expanded={wAll} onToggle={() => setWAll(!wAll)}
+          onRowClick={(w: string) => { setFocus(focus === w ? "" : w); setWDetailAll(false); }}
+          activeRow={focus}
+          renderDetail={(r: any) => (
+            <Detail
+              label={`Identities behind ${r.workload} — and the duckling sizes they ran on`}
+              cols={[
+                { key: "user_name", label: "Identity" },
+                { key: "exec_s",    label: "Compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "read_s",    label: "Read", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "write_s",   label: "Write", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "ducklings", label: "Ducklings", num: true },
+                { key: "sizes",     label: "Instance sizes" },
+                { key: "queue_s",   label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "last_active", label: "Last active" },
+              ]}
+              rows={identitiesFor(r.workload, "all")}
+              empty="No identities in this window."
+              limit={TOP_N} expanded={wDetailAll} onToggle={() => setWDetailAll(!wDetailAll)}
+            />
+          )}
           empty="No traffic in this window."
         />
       </Card>
@@ -565,12 +835,59 @@ export default function AccountUsageMonitoring() {
           loading={probe.isLoading || byIdentity.isLoading}
           sortKey={iSort} dir={iDir}
           onSort={sortToggle(iSort, setISort, iDir, setIDir)}
+          limit={TOP_N} expanded={iAll} onToggle={() => setIAll(!iAll)}
           empty="No traffic in this window."
         />
       </Card>
 
+      <Card title="Read compute"
+            note="Reads only (query_type = 'QUERY'), by workload. Reads usually dominate COMPUTE while writes dominate query COUNT, which is why this is its own section. p95 is per-query latency, and spill to disk means a read exceeded memory — the two signals that separate “expensive because there is a lot of it” from “expensive because it is badly shaped”. Click a row for the identities reading through that surface.">
+        <SortTable
+          cols={[
+            { key: "workload",      label: "Workload" },
+            { key: "exec_s",        label: "Read compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
+            { key: "pct_read_exec", label: "Share of reads", num: true, fmt: (v: any) => `${N(v).toFixed(1)}%` },
+            { key: "queries",       label: "Reads", num: true, fmt: (v: any) => fmtNum(N(v)) },
+            { key: "p95_s",         label: "p95", num: true, fmt: (v: any) => `${N(v).toFixed(2)}s` },
+            { key: "queue_s",       label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
+            { key: "identities",    label: "Readers", num: true },
+            { key: "ducklings",     label: "Ducklings", num: true },
+            { key: "gb_downloaded", label: "Downloaded", num: true, fmt: (v: any) => fmtGb(N(v)) },
+            { key: "gb_spilled",    label: "Spilled", num: true, fmt: (v: any) => fmtGb(N(v)),
+              tone: (v: any) => (N(v) > 0 ? C.red : undefined) },
+            { key: "errors",        label: "Errors", num: true, tone: (v: any) => (N(v) > 0 ? C.red : undefined) },
+            { key: "last_active",   label: "Last active", ts: true },
+          ]}
+          rows={rRows}
+          loading={probe.isLoading || readsByWorkload.isLoading}
+          sortKey={rSort} dir={rDir}
+          onSort={sortToggle(rSort, setRSort, rDir, setRDir)}
+          limit={TOP_N} expanded={rAll} onToggle={() => setRAll(!rAll)}
+          onRowClick={(w: string) => { setReadFocus(readFocus === w ? "" : w); setRDetailAll(false); }}
+          activeRow={readFocus}
+          renderDetail={(r: any) => (
+            <Detail
+              label={`Identities reading through ${r.workload} — duckling counts and sizes cover all their activity on this surface, not reads alone`}
+              cols={[
+                { key: "user_name",    label: "Identity" },
+                { key: "read_s",       label: "Read compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "read_queries", label: "Reads", num: true, fmt: (v: any) => fmtNum(N(v)) },
+                { key: "ducklings",    label: "Ducklings", num: true },
+                { key: "sizes",        label: "Instance sizes" },
+                { key: "queue_s",      label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "last_active",  label: "Last active" },
+              ]}
+              rows={identitiesFor(r.workload, "read")}
+              empty="No readers in this window."
+              limit={TOP_N} expanded={rDetailAll} onToggle={() => setRDetailAll(!rDetailAll)}
+            />
+          )}
+          empty="No reads in this window."
+        />
+      </Card>
+
       <Card title="Load patterns — full refresh vs incremental"
-            note="Writes only, classified from the SQL text. CREATE OR REPLACE, TRUNCATE+reload, and CTAS rebuild the whole table every run: fine nightly, expensive hourly — rescheduling a full refresh from daily to hourly multiplies its compute ~24× on unchanged data. INSERT..SELECT and MERGE touch only new rows, so their cost tracks data volume rather than schedule frequency.">
+            note="Writes only, classified from the SQL text. CREATE OR REPLACE, TRUNCATE+reload, and CTAS rebuild the whole table every run: fine nightly, expensive hourly — rescheduling a full refresh from daily to hourly multiplies its compute ~24× on unchanged data. INSERT..SELECT and MERGE touch only new rows, so their cost tracks data volume rather than schedule frequency. Click a row for the identities running that pattern.">
         <SortTable
           cols={[
             { key: "load_pattern",   label: "Pattern" },
@@ -578,14 +895,29 @@ export default function AccountUsageMonitoring() {
             { key: "pct_write_exec", label: "Share of writes", num: true, fmt: (v: any) => `${N(v).toFixed(1)}%` },
             { key: "queries",        label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
             { key: "identities",     label: "Identities", num: true },
+            { key: "last_active",    label: "Last active", ts: true },
           ]}
-          rows={rowsOf(loads.data).map((r) => ({
-            load_pattern: S(r.load_pattern), exec_s: N(r.exec_s),
-            pct_write_exec: N(r.pct_write_exec), queries: N(r.queries), identities: N(r.identities),
-          }))}
-          loading={probe.isLoading || loads.isLoading}
+          rows={lRows}
+          loading={probe.isLoading || loadsByIdentity.isLoading}
           sortKey={lSort} dir={lDir}
           onSort={sortToggle(lSort, setLSort, lDir, setLDir)}
+          limit={TOP_N} expanded={lAll} onToggle={() => setLAll(!lAll)}
+          onRowClick={(p: string) => { setPatFocus(patFocus === p ? "" : p); setLDetailAll(false); }}
+          activeRow={patFocus}
+          renderDetail={(r: any) => (
+            <Detail
+              label={`Identities running ${r.load_pattern}`}
+              cols={[
+                { key: "user_name",   label: "Identity" },
+                { key: "exec_s",      label: "Compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
+                { key: "queries",     label: "Queries", num: true, fmt: (v: any) => fmtNum(N(v)) },
+                { key: "last_active", label: "Last active" },
+              ]}
+              rows={identitiesForPattern(r.load_pattern)}
+              empty="No identities in this window."
+              limit={TOP_N} expanded={lDetailAll} onToggle={() => setLDetailAll(!lDetailAll)}
+            />
+          )}
           empty="No writes in this window."
         />
       </Card>
@@ -626,13 +958,17 @@ export default function AccountUsageMonitoring() {
         <strong>Compute here is attribution, not a bill.</strong> MotherDuck bills duckling uptime
         per second. <code>execution_time</code> under-counts it, because a duckling stays warm
         between queries, and can over-count it, because concurrent queries on one duckling each
-        accrue wall-clock time against one billed second. Query 8 in <code>queries.sql</code> merges
+        accrue wall-clock time against one billed second. Query 9 in <code>queries.sql</code> merges
         overlapping intervals to measure that gap for this account. Treat the billing portal as the
         authority on money and this dive as the way to find the workload that moved.
         <br /><br />
         <strong>Data moved</strong> is client ⇄ MotherDuck transfer, not your cloud provider’s
         cross-region egress bill — useful for spotting which workload is data-heavy, not for
         reconciling an invoice.
+        <br /><br />
+        <strong>Every table caps at {TOP_N} rows</strong> until “Show more”, and the cap applies
+        after sorting — so “top {TOP_N}” always tracks the column you sorted by. Drill-downs cap the
+        same way and say how many identities they are holding back.
         <br /><br />
         <strong>Ideas from here:</strong> once <em>External app / SDK</em> dominates, the next move is
         not a query — it is giving each pipeline its own service account, which turns “By identity”
