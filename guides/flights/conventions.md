@@ -25,9 +25,13 @@ without loading the rest of the catalog.
   program capped at 200 KB, so there are no helper modules. Pure logic lives in
   `flight.py` and tests import it by path via `importlib`.
 - **Secrets are referenced by name, never committed.** A manifest entry's
-  `secrets` array becomes `flight_secret_names`; each key in the secret's
-  `PARAMS` map arrives as an environment variable. Create the secret once by
-  hand (`CREATE SECRET … (TYPE flights, PARAMS MAP {…})`); the repo only names it.
+  `secrets` array becomes `flight_secret_names`. Each key in the secret's
+  `PARAMS` map arrives as an environment variable twice: namespaced as
+  `<secret_name>_<KEY>` — case preserved, not upper-cased — and again under
+  its bare `<KEY>`. Prefer the namespaced form, as `gdrive-sheets-sync` does
+  with `gsheets_SERVICE_ACCOUNT_JSON`: bare names can collide between two
+  attached secrets or with a `config` key. Create the secret once by hand
+  (`CREATE SECRET … (TYPE flights, PARAMS MAP {…})`); the repo only names it.
 - **`run_on_deploy: false` deploys a Flight without running it.** Default is
   `true`, which is right for `agent-commerce-monthly-rollup` because a Dive
   depends on the database it creates. Set it `false` when a Flight calls an
