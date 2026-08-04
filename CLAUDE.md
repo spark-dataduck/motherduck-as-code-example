@@ -35,6 +35,8 @@ MANIFEST=other.json ./deploy.sh --dry-run   # manifest path is overridable
 
 **Do not run `./deploy.sh` locally.** Deployment happens through CI: a pull request runs `--dry-run` into the job summary, and a merge to `main` applies. A local apply competes with CI for the same name-keyed artifacts. Use `--dry-run` freely — it only reads.
 
+**A pull request validates `plan()` only.** `--dry-run` exits after printing the plan, so the Flight create/update path — the config `MAP`, `flight_secret_names`, the conditional `schedule_cron`, and the `run_on_deploy` case — first executes on the post-merge Apply. Read a green PR as evidence about names and lookups, not about Flight arguments.
+
 **The DuckDB CLI is pinned to 1.5.4** in `.github/workflows/deploy.yml`. MotherDuck supports a maximum DuckDB version and DuckDB releases ahead of it, so `latest` breaks on the next DuckDB release. Bump only after MotherDuck announces support.
 
 ## Architecture
@@ -113,12 +115,21 @@ This applies to reads too — resolve an ID into a variable before `MD_GET_DIVE`
   its bare `<KEY>`. Prefer the namespaced form, as `gdrive-sheets-sync` does
   with `gsheets_SERVICE_ACCOUNT_JSON`: bare names can collide between two
   attached secrets or with a `config` key. Create the secret once by hand
-  (`CREATE SECRET … (TYPE flights, PARAMS MAP {…})`); the repo only names it.
+  (`CREATE SECRET gsheets IN MOTHERDUCK (TYPE FLIGHTS, PARAMS MAP
+  { 'SERVICE_ACCOUNT_JSON': '…' })`); the repo only names it.
 - **`run_on_deploy: false` deploys a Flight without running it.** Default is
   `true`, which is right for `agent-commerce-monthly-rollup` because a Dive
   depends on the database it creates. Set it `false` when a Flight calls an
   external API whose credentials CI may not have — a failed run would otherwise
   fail the whole deploy.
+- **`schedule_cron` and `secrets` are declared, not reconciled.** `MD_UPDATE_FLIGHT`
+  is a PATCH — omitting an argument leaves the stored value untouched. So a
+  schedule added by hand in the UI, or a `schedule_cron` removed from a manifest
+  entry, will *not* be noticed by the next deploy, unlike a Dive's `status`.
+  Correct reconciliation needs a read-modify-write: read the current schedule
+  from `MD_LIST_FLIGHTS()` and send `schedule_cron := ''` only when a schedule
+  actually exists, because blanking a Flight that has none returns an error.
+  This hole is deliberately open — close it with intent.
 
 See `guides/flights/conventions.md`.
 

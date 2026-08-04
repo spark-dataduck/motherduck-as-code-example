@@ -125,6 +125,7 @@ def discover(
     """
     planned: list[PlannedItem] = []
     warnings: list[str] = []
+    non_native_skipped = 0
 
     # stack entries are (folder_id, path_parts)
     stack: list[tuple[str, list[str]]] = []
@@ -148,6 +149,7 @@ def discover(
                 continue
 
             if mime != SHEET_MIME:
+                non_native_skipped += 1
                 warnings.append(
                     f"{path}/{name} is not a native Google Sheet "
                     f"(mimeType={mime}); skipped"
@@ -174,6 +176,11 @@ def discover(
                         tab=tab,
                     )
                 )
+
+    if non_native_skipped:
+        warnings.append(
+            f"{non_native_skipped} file(s) skipped as not native Google Sheets"
+        )
 
     return planned, warnings
 
@@ -243,12 +250,7 @@ def folder_name(service, folder_id: str) -> str:
     return meta["name"]
 
 
-# --- SQL helpers ------------------------------------------------------------
-
-# NOTE: duckdb, google-*, and tenacity are imported INSIDE main(), not here.
-# The test suite loads this file with importlib.exec_module to reach the pure
-# helpers, so a third-party import at module scope would force CI to install the
-# Flight's full runtime dependencies just to unit-test slugify().
+# --- constants ---------------------------------------------------------
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -259,6 +261,14 @@ SYNC_LOG_COLUMNS = [
     "run_id", "source_ref", "target_ref", "rows", "attempts",
     "status", "error", "started_at", "finished_at",
 ]
+
+
+# --- SQL helpers ------------------------------------------------------------
+
+# NOTE: duckdb, google-*, and tenacity are imported INSIDE main(), not here.
+# The test suite loads this file with importlib.exec_module to reach the pure
+# helpers, so a third-party import at module scope would force CI to install the
+# Flight's full runtime dependencies just to unit-test slugify().
 
 
 def quote_ident(ident: str) -> str:
@@ -339,6 +349,26 @@ def _env_float(key: str, default: float) -> float:
 
 # --- main -------------------------------------------------------------------
 
+def _warn_orphans(con, target_db: str, planned: list[PlannedItem]) -> None:
+    """Warn about tables in the database that discovery did not find.
+
+    Names are the key, so a Drive rename creates a new table and leaves the old
+    one stale. Warn only — never drop, because these are customer data tables.
+    """
+    existing = con.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        "WHERE table_catalog = ? AND table_type = 'BASE TABLE' "
+        "AND NOT (table_schema = 'main' AND table_name = 'gsheets_sync_log')",
+        [target_db],
+    ).fetchall()
+    expected = {(item.schema, item.table) for item in planned}
+    for schema, table in sorted(set(existing) - expected):
+        print(
+            f"WARNING: orphan table {target_db}.{schema}.{table} was not found in "
+            "Drive this run (renamed or deleted?); not dropped"
+        )
+
+
 def main() -> None:
     # Imported here, not at module scope, so unit tests can load this file
     # without the Flight's runtime dependencies installed.
@@ -380,7 +410,6 @@ def main() -> None:
     # Printed as collected (not batched) so the diagnostic survives even if
     # discover() itself raises before the later combined-warnings print runs.
     roots: list[tuple[str, str]] = []
-    root_warnings: list[str] = []
     for fid in root_ids:
         try:
             roots.append((fid, folder_name(drive, fid)))
@@ -389,7 +418,6 @@ def main() -> None:
                 f"root folder {fid} is unreadable ({exc}); is it shared with "
                 f"{key['client_email']}?"
             )
-            root_warnings.append(warning)
             print(f"WARNING: {warning}")
     if not roots:
         raise RuntimeError("no readable root folders; nothing to discover")
@@ -401,8 +429,8 @@ def main() -> None:
         exclude_folder_ids,
         exclude_patterns,
     )
-    # root_warnings already printed above as they were collected; only the
-    # discovery warnings are new here.
+    # Root warnings were already printed above as they were collected; only
+    # the discovery warnings are new here.
     for warning in warnings:
         print(f"WARNING: {warning}")
 
@@ -421,6 +449,14 @@ def main() -> None:
 
     if discover_only:
         print("DISCOVER_ONLY=true; nothing written")
+        return
+
+    if not planned:
+        print(
+            "WARNING: discovery found nothing loadable; check the warnings "
+            "above (excluded roots, excluded folders, filtered patterns, or "
+            "non-native files)"
+        )
         return
 
     con = duckdb.connect("md:")
@@ -505,26 +541,6 @@ def main() -> None:
             raise SystemExit(1)
     finally:
         con.close()
-
-
-def _warn_orphans(con, target_db: str, planned: list[PlannedItem]) -> None:
-    """Warn about tables in the database that discovery did not find.
-
-    Names are the key, so a Drive rename creates a new table and leaves the old
-    one stale. Warn only — never drop, because these are customer data tables.
-    """
-    existing = con.execute(
-        "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_catalog = ? AND table_type = 'BASE TABLE' "
-        "AND NOT (table_schema = 'main' AND table_name = 'gsheets_sync_log')",
-        [target_db],
-    ).fetchall()
-    expected = {(item.schema, item.table) for item in planned}
-    for schema, table in sorted(set(existing) - expected):
-        print(
-            f"WARNING: orphan table {target_db}.{schema}.{table} was not found in "
-            "Drive this run (renamed or deleted?); not dropped"
-        )
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ def test_discover_warns_about_excluded_root_folders():
         exclude_patterns=[],
     )
     assert planned == []
-    assert any("Finance" in w for w in warnings)
+    assert any("excluded root folder" in w and "Finance" in w for w in warnings)
 
 
 def test_discover_honours_filename_patterns():

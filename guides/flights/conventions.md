@@ -31,12 +31,22 @@ without loading the rest of the catalog.
   its bare `<KEY>`. Prefer the namespaced form, as `gdrive-sheets-sync` does
   with `gsheets_SERVICE_ACCOUNT_JSON`: bare names can collide between two
   attached secrets or with a `config` key. Create the secret once by hand
-  (`CREATE SECRET … (TYPE flights, PARAMS MAP {…})`); the repo only names it.
+  (`CREATE SECRET gsheets IN MOTHERDUCK (TYPE FLIGHTS, PARAMS MAP
+  { 'SERVICE_ACCOUNT_JSON': '…' })`); the repo only names it.
 - **`run_on_deploy: false` deploys a Flight without running it.** Default is
   `true`, which is right for `agent-commerce-monthly-rollup` because a Dive
   depends on the database it creates. Set it `false` when a Flight calls an
   external API whose credentials CI may not have — a failed run would
   otherwise fail the whole deploy.
+- **`schedule_cron` and `secrets` are declared, not reconciled.**
+  `MD_UPDATE_FLIGHT` is a PATCH — omitting an argument leaves the stored value
+  untouched. So a schedule added by hand in the UI, or a `schedule_cron`
+  removed from a manifest entry, will *not* be noticed by the next deploy,
+  unlike a Dive's `status`. Correct reconciliation needs a read-modify-write:
+  read the current schedule from `MD_LIST_FLIGHTS()` and send
+  `schedule_cron := ''` only when a schedule actually exists, because
+  blanking a Flight that has none returns an error. This hole is deliberately
+  open — close it with intent.
 
 ## Shape of a Flight
 
