@@ -60,13 +60,25 @@ def test_discover_warns_about_non_native_files_instead_of_skipping_silently():
 
 
 def test_discover_honours_folder_exclusions():
-    planned, _ = mod.discover(
+    planned, warnings = mod.discover(
         fake_children, fake_tabs,
         root_folders=[("root", "Finance")],
         exclude_folder_ids={"f_inv"},
         exclude_patterns=[],
     )
     assert planned == []
+    assert any("excluded folder" in w and "Invoices" in w for w in warnings)
+
+
+def test_discover_warns_about_excluded_root_folders():
+    planned, warnings = mod.discover(
+        fake_children, fake_tabs,
+        root_folders=[("root", "Finance")],
+        exclude_folder_ids={"root"},
+        exclude_patterns=[],
+    )
+    assert planned == []
+    assert any("Finance" in w for w in warnings)
 
 
 def test_discover_honours_filename_patterns():

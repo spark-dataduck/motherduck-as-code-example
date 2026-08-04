@@ -124,36 +124,40 @@ def discover(
     warnings: list[str] = []
 
     # stack entries are (folder_id, path_parts)
-    stack = [
-        (fid, [name]) for fid, name in root_folders if fid not in exclude_folder_ids
-    ]
+    stack: list[tuple[str, list[str]]] = []
+    for fid, name in root_folders:
+        if fid in exclude_folder_ids:
+            warnings.append(f"excluded root folder: {name}")
+            continue
+        stack.append((fid, [name]))
 
     while stack:
         folder_id, path_parts = stack.pop()
+        path = "/".join(path_parts)
         for child in list_children(folder_id):
             name, mime, cid = child["name"], child["mimeType"], child["id"]
 
             if mime == FOLDER_MIME:
                 if cid in exclude_folder_ids:
-                    warnings.append(f"excluded folder: {'/'.join(path_parts)}/{name}")
+                    warnings.append(f"excluded folder: {path}/{name}")
                     continue
                 stack.append((cid, path_parts + [name]))
                 continue
 
             if mime != SHEET_MIME:
                 warnings.append(
-                    f"{'/'.join(path_parts)}/{name} is not a native Google Sheet "
+                    f"{path}/{name} is not a native Google Sheet "
                     f"(mimeType={mime}); skipped"
                 )
                 continue
 
             if any(fnmatch.fnmatch(name, pat) for pat in exclude_patterns):
-                warnings.append(f"excluded by pattern: {'/'.join(path_parts)}/{name}")
+                warnings.append(f"excluded by pattern: {path}/{name}")
                 continue
 
             tabs = list_tabs(cid)
             if not tabs:
-                warnings.append(f"{'/'.join(path_parts)}/{name} has no readable tabs")
+                warnings.append(f"{path}/{name} has no readable tabs")
                 continue
 
             schema = resolve_schema(path_parts)
