@@ -12,7 +12,7 @@ Config (surfaced as environment variables by the Flight runtime):
   ALL_VARCHAR         land every column as VARCHAR                  (default: true)
   DISCOVER_ONLY       print the resolved plan and write nothing     (default: false)
   FAIL_ON_COLLISION   abort before loading if two items collide     (default: true)
-  MAX_RETRIES         per-item retry attempts                       (default: 5)
+  MAX_ATTEMPTS        per-item total attempts (not "retries")       (default: 5)
   RETRY_BASE_SECONDS  exponential-backoff multiplier                (default: 2)
 
 Secret (Flight secret, TYPE flights, named by flight_secret_names):
@@ -21,9 +21,14 @@ Secret (Flight secret, TYPE flights, named by flight_secret_names):
 
 from __future__ import annotations
 
+import fnmatch
+import json
+import os
 import re
 import unicodedata
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 # --- naming -----------------------------------------------------------------
 
@@ -97,8 +102,6 @@ def detect_collisions(
 
 
 # --- discovery --------------------------------------------------------------
-
-import fnmatch
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -222,21 +225,25 @@ def sheets_tab_lister(service):
 
 
 def folder_name(service, folder_id: str) -> str:
-    """Resolve a root folder's own name, which becomes the top path segment."""
+    """Resolve a root folder's own name, which becomes the top path segment.
+
+    Also validates the ID is actually a folder: pasting a spreadsheet ID into
+    ROOT_FOLDER_IDS would otherwise yield a silent zero-result walk instead of
+    a clear error.
+    """
     meta = (
         service.files()
-        .get(fileId=folder_id, fields="name", supportsAllDrives=True)
+        .get(fileId=folder_id, fields="name, mimeType", supportsAllDrives=True)
         .execute()
     )
+    if meta["mimeType"] != FOLDER_MIME:
+        raise RuntimeError(
+            f"{folder_id} is not a folder (mimeType={meta['mimeType']})"
+        )
     return meta["name"]
 
 
 # --- SQL helpers ------------------------------------------------------------
-
-import json
-import os
-import uuid
-from datetime import datetime, timezone
 
 # NOTE: duckdb, google-*, and tenacity are imported INSIDE main(), not here.
 # The test suite loads this file with importlib.exec_module to reach the pure
@@ -255,6 +262,8 @@ SYNC_LOG_COLUMNS = [
 
 
 def quote_ident(ident: str) -> str:
+    if not isinstance(ident, str):
+        raise TypeError(f"quote_ident() requires a string, got {type(ident).__name__}")
     return '"' + ident.replace('"', '""') + '"'
 
 
@@ -271,13 +280,61 @@ def build_read_sql(item: PlannedItem, all_varchar: bool) -> str:
     return f"SELECT * FROM read_gsheet({', '.join(args)})"
 
 
-def _env_json(key: str, default):
-    raw = os.environ.get(key, "").strip()
-    return json.loads(raw) if raw else default
+# --- config parsing -----------------------------------------------------
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
 
 
 def _env_bool(key: str, default: bool) -> bool:
-    return os.environ.get(key, str(default)).strip().lower() in ("1", "true", "yes")
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise RuntimeError(
+        f"{key}={raw!r} is not a boolean; use one of {sorted(_TRUE | _FALSE)}"
+    )
+
+
+def _env_json(key: str, default):
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{key} is not valid JSON: {exc}") from exc
+
+
+def _env_str_list(key: str, default: list[str]) -> list[str]:
+    value = _env_json(key, default)
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise RuntimeError(f"{key} must be a JSON array of strings, got {value!r}")
+    return value
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{key}={raw!r} is not an integer") from exc
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{key}={raw!r} is not a number") from exc
 
 
 # --- main -------------------------------------------------------------------
@@ -295,18 +352,18 @@ def main() -> None:
         wait_random,
     )
 
-    root_ids = _env_json("ROOT_FOLDER_IDS", [])
+    root_ids = _env_str_list("ROOT_FOLDER_IDS", [])
     if not root_ids:
         raise RuntimeError("ROOT_FOLDER_IDS config is required")
 
-    target_db = os.environ.get("TARGET_DATABASE", "google_drive")
-    exclude_folder_ids = set(_env_json("EXCLUDE_FOLDER_IDS", []))
-    exclude_patterns = _env_json("EXCLUDE_PATTERNS", [])
+    target_db = os.environ.get("TARGET_DATABASE", "").strip() or "google_drive"
+    exclude_folder_ids = set(_env_str_list("EXCLUDE_FOLDER_IDS", []))
+    exclude_patterns = _env_str_list("EXCLUDE_PATTERNS", [])
     all_varchar = _env_bool("ALL_VARCHAR", True)
     discover_only = _env_bool("DISCOVER_ONLY", False)
     fail_on_collision = _env_bool("FAIL_ON_COLLISION", True)
-    max_retries = int(os.environ.get("MAX_RETRIES", "5"))
-    retry_base = float(os.environ.get("RETRY_BASE_SECONDS", "2"))
+    max_attempts = _env_int("MAX_ATTEMPTS", 5)
+    retry_base = _env_float("RETRY_BASE_SECONDS", 2)
 
     key_json = os.environ.get("gsheets_SERVICE_ACCOUNT_JSON", "")
     if not key_json:
@@ -320,19 +377,21 @@ def main() -> None:
 
     # A root folder that was never shared with the service account is invisible.
     # Warn per root and carry on; do not fail the run over one misconfigured id.
+    # Printed as collected (not batched) so the diagnostic survives even if
+    # discover() itself raises before the later combined-warnings print runs.
     roots: list[tuple[str, str]] = []
     root_warnings: list[str] = []
     for fid in root_ids:
         try:
             roots.append((fid, folder_name(drive, fid)))
         except Exception as exc:  # noqa: BLE001 - one bad root must not stop the rest
-            root_warnings.append(
+            warning = (
                 f"root folder {fid} is unreadable ({exc}); is it shared with "
                 f"{key['client_email']}?"
             )
-    if not roots:
-        for warning in root_warnings:
+            root_warnings.append(warning)
             print(f"WARNING: {warning}")
+    if not roots:
         raise RuntimeError("no readable root folders; nothing to discover")
 
     planned, warnings = discover(
@@ -342,8 +401,14 @@ def main() -> None:
         exclude_folder_ids,
         exclude_patterns,
     )
-    for warning in root_warnings + warnings:
+    # root_warnings already printed above as they were collected; only the
+    # discovery warnings are new here.
+    for warning in warnings:
         print(f"WARNING: {warning}")
+
+    print(f"Resolved {len(planned)} table(s) across {len(roots)} root folder(s):")
+    for item in planned:
+        print(f"  {target_db}.{item.schema}.{item.table}  <-  {item.source_ref}")
 
     collisions = detect_collisions(planned)
     if collisions:
@@ -354,82 +419,92 @@ def main() -> None:
                 f"{len(collisions)} table-name collision(s); nothing was loaded"
             )
 
-    print(f"Resolved {len(planned)} table(s) across {len(roots)} root folder(s):")
-    for item in planned:
-        print(f"  {target_db}.{item.schema}.{item.table}  <-  {item.source_ref}")
-
     if discover_only:
         print("DISCOVER_ONLY=true; nothing written")
         return
 
     con = duckdb.connect("md:")
-    con.execute("INSTALL gsheets FROM community")
-    con.execute("LOAD gsheets")
-    con.execute(
-        f"CREATE OR REPLACE SECRET gsheet_auth "
-        f"(TYPE gsheet, PROVIDER key_file, EMAIL {sql_str(key['client_email'])}, "
-        f"SECRET {sql_str(key['private_key'])})"
-    )
-    con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(target_db)}")
-    log_table = f"{quote_ident(target_db)}.main.gsheets_sync_log"
-    con.execute(
-        f"CREATE TABLE IF NOT EXISTS {log_table} ("
-        "run_id VARCHAR, source_ref VARCHAR, target_ref VARCHAR, rows BIGINT, "
-        "attempts INTEGER, status VARCHAR, error VARCHAR, "
-        "started_at TIMESTAMP, finished_at TIMESTAMP)"
-    )
-
-    run_id = str(uuid.uuid4())
-    for schema in sorted({item.schema for item in planned}):
+    try:
+        con.execute("INSTALL gsheets FROM community")
+        con.execute("LOAD gsheets")
+        # CREATE SECRET has no parameter-binding form, so the private key
+        # necessarily transits the query path and may appear in query history.
+        # Readers of this public example should know what they're putting here.
         con.execute(
-            f"CREATE SCHEMA IF NOT EXISTS {quote_ident(target_db)}.{quote_ident(schema)}"
+            f"CREATE OR REPLACE SECRET gsheet_auth "
+            f"(TYPE gsheet, PROVIDER key_file, EMAIL {sql_str(key['client_email'])}, "
+            f"SECRET {sql_str(key['private_key'])})"
+        )
+        con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(target_db)}")
+        log_table = f"{quote_ident(target_db)}.main.gsheets_sync_log"
+        con.execute(
+            f"CREATE TABLE IF NOT EXISTS {log_table} ("
+            "run_id VARCHAR, source_ref VARCHAR, target_ref VARCHAR, rows BIGINT, "
+            "attempts INTEGER, status VARCHAR, error VARCHAR, "
+            "started_at TIMESTAMP WITH TIME ZONE, finished_at TIMESTAMP WITH TIME ZONE)"
         )
 
-    failures = 0
-    for item in planned:
-        target_ref = (
-            f"{quote_ident(target_db)}.{quote_ident(item.schema)}.{quote_ident(item.table)}"
-        )
-        started = datetime.now(timezone.utc)
-        attempts = 0
-
-        def job():
-            nonlocal attempts
-            attempts += 1
+        run_id = str(uuid.uuid4())
+        for schema in sorted({item.schema for item in planned}):
             con.execute(
-                f"CREATE OR REPLACE TABLE {target_ref} AS "
-                f"{build_read_sql(item, all_varchar)}"
+                f"CREATE SCHEMA IF NOT EXISTS {quote_ident(target_db)}.{quote_ident(schema)}"
             )
-            return con.execute(f"SELECT count(*) FROM {target_ref}").fetchone()[0]
 
-        retryer = Retrying(
-            stop=stop_after_attempt(max_retries),
-            wait=wait_exponential(multiplier=retry_base, max=60) + wait_random(0, 1),
-            reraise=True,
-        )
-        try:
-            rows = retryer(job)
-            status, error = "ok", None
-            print(f"OK   {item.source_ref} -> {target_ref} ({rows} rows)")
-        except Exception as exc:  # noqa: BLE001 - one bad sheet must not stop the rest
-            rows, status, error = None, "failed", str(exc)[:2000]
-            failures += 1
-            print(f"FAIL {item.source_ref}: {error}")
+        failures = 0
+        for item in planned:
+            # target_ref is the unquoted, human/audit-log form so it stays
+            # joinable to a plain information_schema listing; target_sql is
+            # the quoted form used in every DDL/DML statement below.
+            target_ref = f"{target_db}.{item.schema}.{item.table}"
+            target_sql = (
+                f"{quote_ident(target_db)}.{quote_ident(item.schema)}.{quote_ident(item.table)}"
+            )
+            started = datetime.now(timezone.utc)
+            attempts = 0
 
-        con.execute(
-            f"INSERT INTO {log_table} ({', '.join(SYNC_LOG_COLUMNS)}) "
-            f"VALUES ({', '.join('?' * len(SYNC_LOG_COLUMNS))})",
-            [
-                run_id, item.source_ref, target_ref, rows, attempts,
-                status, error, started, datetime.now(timezone.utc),
-            ],
-        )
+            def job():
+                nonlocal attempts
+                attempts += 1
+                con.execute(
+                    f"CREATE OR REPLACE TABLE {target_sql} AS "
+                    f"{build_read_sql(item, all_varchar)}"
+                )
+                return con.execute(f"SELECT count(*) FROM {target_sql}").fetchone()[0]
 
-    _warn_orphans(con, target_db, planned)
+            # Retries are not restricted by exception type: a permanently
+            # broken sheet burns all max_attempts with backoff (~30s at the
+            # default multiplier), so 50 broken sheets means ~25 minutes of
+            # sleeping. Worst case, not a bug — do not change this behavior.
+            retryer = Retrying(
+                stop=stop_after_attempt(max_attempts),
+                wait=wait_exponential(multiplier=retry_base, max=60) + wait_random(0, 1),
+                reraise=True,
+            )
+            try:
+                rows = retryer(job)
+                status, error = "ok", None
+                print(f"OK   {item.source_ref} -> {target_ref} ({rows} rows)")
+            except Exception as exc:  # noqa: BLE001 - one bad sheet must not stop the rest
+                rows, status, error = None, "failed", str(exc)[:2000]
+                failures += 1
+                print(f"FAIL {item.source_ref}: {error}")
 
-    print(f"Done: {len(planned) - failures} succeeded, {failures} failed")
-    if failures:
-        raise SystemExit(1)
+            con.execute(
+                f"INSERT INTO {log_table} ({', '.join(SYNC_LOG_COLUMNS)}) "
+                f"VALUES ({', '.join(['?'] * len(SYNC_LOG_COLUMNS))})",
+                [
+                    run_id, item.source_ref, target_ref, rows, attempts,
+                    status, error, started, datetime.now(timezone.utc),
+                ],
+            )
+
+        _warn_orphans(con, target_db, planned)
+
+        print(f"Done: {len(planned) - failures} item(s) succeeded, {failures} failed")
+        if failures:
+            raise SystemExit(1)
+    finally:
+        con.close()
 
 
 def _warn_orphans(con, target_db: str, planned: list[PlannedItem]) -> None:
@@ -440,7 +515,8 @@ def _warn_orphans(con, target_db: str, planned: list[PlannedItem]) -> None:
     """
     existing = con.execute(
         "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_catalog = ? AND table_name <> 'gsheets_sync_log'",
+        "WHERE table_catalog = ? AND table_type = 'BASE TABLE' "
+        "AND NOT (table_schema = 'main' AND table_name = 'gsheets_sync_log')",
         [target_db],
     ).fetchall()
     expected = {(item.schema, item.table) for item in planned}

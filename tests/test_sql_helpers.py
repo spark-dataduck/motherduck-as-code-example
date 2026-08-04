@@ -2,6 +2,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 FLIGHT = Path(__file__).parent.parent / "flights" / "gdrive-sheets-sync" / "flight.py"
 _spec = importlib.util.spec_from_file_location("gdrive_sheets_sync", FLIGHT)
 mod = importlib.util.module_from_spec(_spec)
@@ -31,3 +33,15 @@ def test_build_read_sql_quotes_tab_and_sets_all_varchar():
 def test_build_read_sql_omits_all_varchar_when_disabled():
     item = mod.PlannedItem("finance", "budget_q1", "Finance/Budget[Q1]", "abc123", "Q1")
     assert "all_varchar" not in mod.build_read_sql(item, all_varchar=False)
+
+
+def test_build_read_sql_escapes_hostile_tab_and_file_id():
+    item = mod.PlannedItem("s", "t", "ref", "a'b", "Q1'); DROP TABLE x; --")
+    sql = mod.build_read_sql(item, all_varchar=True)
+    assert "read_gsheet('a''b'" in sql
+    assert "sheet='Q1''); DROP TABLE x; --'" in sql
+
+
+def test_sql_str_rejects_non_string():
+    with pytest.raises(TypeError):
+        mod.sql_str(42)
