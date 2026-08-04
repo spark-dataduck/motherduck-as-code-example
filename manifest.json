@@ -30,8 +30,8 @@
       ]
     },
     {
-      "title": "Account Usage Monitoring",
-      "source": "dives/account-usage-monitoring/dive.tsx",
+      "title": "Overall Usage Monitoring",
+      "source": "dives/overall-usage-monitoring/dive.tsx",
       "description": "Account-wide compute from MD_INFORMATION_SCHEMA.QUERY_HISTORY, with every query classified into exactly one workload, attributed by identity, and split into full-refresh vs incremental load patterns. The entry point above the per-surface monitoring dives.",
       "required_resources": []
     },

@@ -6,7 +6,7 @@ was verified against real `user_agent` values.
 
 Two altitudes. **Account-wide** ("our spend moved — what changed?") classifies
 every row into exactly one workload so the shares add to 100%; that is
-`Account Usage Monitoring`. **Per-surface** ("which Dive, which MCP client")
+`Overall Usage Monitoring`. **Per-surface** ("which Dive, which MCP client")
 goes deep on one bucket. Start account-wide, then descend.
 
 ## Rules
@@ -50,7 +50,7 @@ That last row is the one that matters for cost. A load pipeline running from CI
 carries no MotherDuck marker at all, so it is only identifiable as "everything
 else" — and it is routinely the largest consumer in an account. Run the
 user-agent census (the bonus query in
-`dives/account-usage-monitoring/queries.sql`) before trusting any bucketing you
+`dives/overall-usage-monitoring/queries.sql`) before trusting any bucketing you
 copied from here.
 
 Note the doubled `/v1/v1` and the trailing `,transport=…` in the MCP-app form.
@@ -152,7 +152,7 @@ from uptime in both directions:
   each accrue their own wall-clock `execution_time` against one billed second.
 
 Merging overlapping `[start_time, end_time)` intervals per `duckling_id`
-(gaps-and-islands; query 9 in `dives/account-usage-monitoring/queries.sql`)
+(gaps-and-islands; query 9 in `dives/overall-usage-monitoring/queries.sql`)
 measures the second effect for a given account. A `concurrency_factor` near 1.0
 means queries run sequentially and `exec_s` is a fair proxy; well above 1.0 means
 `exec_s` overstates billed compute and the merged figure should be used instead.

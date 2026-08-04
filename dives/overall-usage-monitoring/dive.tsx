@@ -1,4 +1,4 @@
-// Account Usage Monitoring
+// Overall Usage Monitoring
 //
 // Where the account's MotherDuck compute actually goes, across every surface.
 //
@@ -19,18 +19,27 @@
 // READ / WRITE SPLIT. Reads are query_type = 'QUERY'; writes are DDL + DML. TCL
 // (transactions) is neither, so read% + write% falls a hair short of 100 — the
 // header states the residue rather than hiding it. Reads and writes are wildly
-// asymmetric: writes usually dominate query COUNT while reads dominate COMPUTE,
-// which is why they get separate sections instead of one table with a filter.
+// asymmetric — writes usually dominate query COUNT while reads dominate COMPUTE —
+// so both are carried as columns in "By workload" and as their own lines in
+// "Active hours", rather than in a separate read-only section.
 //
-// DRILL-DOWNS. Clicking a row in "By workload", "Load patterns", or "Read
-// compute" expands the identities behind it — and in the workload case, each
-// identity's duckling instance sizes. All of it is filtered client-side from data
-// already fetched; clicking never issues a query.
+// DRILL-DOWNS. Clicking a row in "By workload" or "Load patterns" expands the
+// identities behind it — and in the workload case, each identity's duckling
+// instance sizes. All of it is filtered client-side from data already fetched;
+// clicking never issues a query.
 //
-// PALETTE NOTE: the stacked chart honours the one-accent rule from
+// PALETTE NOTES. The stacked chart honours the one-accent rule from
 // guides/dives/conventions.md by giving the SELECTED workload the blue and
 // rendering every other band in a neutral ramp. Clicking a "By workload" row
-// moves both the accent and the drill-down. No second hue is introduced.
+// moves both the accent and the drill-down.
+//
+// "Active hours" is the documented exception to that rule: it uses blue for write
+// compute and RED for read compute. The conventions guide otherwise reserves
+// red for direction (a decrease, an error), never for a category. Read-vs-write
+// is this dive's central dichotomy and the two lines share one axis, so they need
+// to be told apart at a glance; blue-vs-blueLight is not separable enough on a
+// dashed line. The exception is recorded in the conventions guide so the rule
+// stays honest rather than quietly broken.
 //
 // The same SQL, ready to paste into a notebook, is in queries.sql.
 
@@ -310,7 +319,6 @@ export default function AccountUsageMonitoring() {
   // One expanded row per section, doubling as the chart accent for workloads.
   const [focus, setFocus]         = useDiveState<string>("focus", "");
   const [patFocus, setPatFocus]   = useDiveState<string>("pat_focus", "");
-  const [readFocus, setReadFocus] = useDiveState<string>("read_focus", "");
 
   const [wSort, setWSort] = useDiveState<string>("w_sort", "exec_s");
   const [wDir, setWDir]   = useDiveState<string>("w_dir", "desc");
@@ -318,16 +326,12 @@ export default function AccountUsageMonitoring() {
   const [iDir, setIDir]   = useDiveState<string>("i_dir", "desc");
   const [lSort, setLSort] = useDiveState<string>("l_sort", "exec_s");
   const [lDir, setLDir]   = useDiveState<string>("l_dir", "desc");
-  const [rSort, setRSort] = useDiveState<string>("r_sort", "exec_s");
-  const [rDir, setRDir]   = useDiveState<string>("r_dir", "desc");
 
   const [wAll, setWAll] = useDiveState<boolean>("w_all", false);
   const [iAll, setIAll] = useDiveState<boolean>("i_all", false);
   const [lAll, setLAll] = useDiveState<boolean>("l_all", false);
-  const [rAll, setRAll] = useDiveState<boolean>("r_all", false);
   const [wDetailAll, setWDetailAll] = useDiveState<boolean>("w_detail_all", false);
   const [lDetailAll, setLDetailAll] = useDiveState<boolean>("l_detail_all", false);
-  const [rDetailAll, setRDetailAll] = useDiveState<boolean>("r_detail_all", false);
 
   const d = Number(days) || 30;
 
@@ -385,8 +389,8 @@ export default function AccountUsageMonitoring() {
     ORDER BY exec_s DESC
   `, { enabled: ready });
 
-  // Drill-down source for BOTH "By workload" and "Read compute", at
-  // workload x identity x instance_type grain. Small by construction (~125 rows
+  // Drill-down source for "By workload", at workload x identity x instance_type
+  // grain. Small by construction (~125 rows
   // over 90 days in a busy org), so the client filters and rolls it up rather
   // than re-querying on every click.
   const wkIdentity = useSQLQuery(`
@@ -486,31 +490,10 @@ export default function AccountUsageMonitoring() {
     ORDER BY exec_s DESC
   `, { enabled: ready });
 
-  // Reads only (query_type = 'QUERY'), by workload. p95 and spill are computed
-  // here at workload grain rather than derived from wkIdentity, because neither
-  // a quantile nor a distinct count rolls up correctly from a finer grain.
-  const readsByWorkload = useSQLQuery(`
-    SELECT ${WORKLOAD}                                        AS workload,
-           count(*)                                           AS queries,
-           round(sum(epoch(execution_time)), 1)               AS exec_s,
-           round(100.0 * sum(epoch(execution_time))
-                 / sum(sum(epoch(execution_time))) OVER (), 1) AS pct_read_exec,
-           round(quantile_cont(epoch(execution_time), 0.95), 2) AS p95_s,
-           round(sum(epoch(wait_time)), 1)                    AS queue_s,
-           count(DISTINCT user_name)                          AS identities,
-           count(DISTINCT duckling_id)                        AS ducklings,
-           round(sum(bytes_downloaded) / 1e9, 2)              AS gb_downloaded,
-           round(sum(bytes_spilled_to_disk) / 1e9, 2)         AS gb_spilled,
-           count(*) FILTER (error_message IS NOT NULL)        AS errors,
-           strftime(max(start_time), '%Y-%m-%d %H:%M')        AS last_active
-    FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
-    WHERE start_time > now() - INTERVAL ${d} DAY
-      AND query_type = 'QUERY'
-    GROUP BY ALL
-    ORDER BY exec_s DESC
-  `, { enabled: ready });
-
-  const cadence = useSQLQuery(`
+  // Hours of the day the account was doing anything, plus the read/write compute
+  // split behind it. active_hours counts DISTINCT hours, so it is
+  // timezone-independent — it reads as a schedule without knowing the cron.
+  const activity = useSQLQuery(`
     WITH spine AS (
       SELECT unnest(generate_series(
         date_trunc('day', now() - INTERVAL ${d} DAY)::TIMESTAMP,
@@ -519,17 +502,21 @@ export default function AccountUsageMonitoring() {
     hits AS (
       SELECT date_trunc('day', start_time)::DATE            AS day,
              count(DISTINCT date_trunc('hour', start_time)) AS active_hours,
-             count(*)                                       AS write_queries,
-             round(sum(epoch(execution_time)), 1)           AS exec_s
+             count(DISTINCT date_trunc('hour', start_time))
+               FILTER (query_type IN ('DDL', 'DML'))        AS write_hours,
+             round(coalesce(sum(epoch(execution_time))
+                   FILTER (query_type IN ('DDL', 'DML')), 0), 1)  AS write_s,
+             round(coalesce(sum(epoch(execution_time))
+                   FILTER (query_type = 'QUERY'), 0), 1)          AS read_s
       FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
       WHERE start_time > now() - INTERVAL ${d} DAY
-        AND query_type IN ('DDL', 'DML')
       GROUP BY 1
     )
     SELECT s.day::VARCHAR AS day,
-           coalesce(h.active_hours, 0)  AS active_hours,
-           coalesce(h.write_queries, 0) AS write_queries,
-           coalesce(h.exec_s, 0)        AS exec_s
+           coalesce(h.active_hours, 0) AS active_hours,
+           coalesce(h.write_hours, 0)  AS write_hours,
+           coalesce(h.write_s, 0)      AS write_s,
+           coalesce(h.read_s, 0)       AS read_s
     FROM spine s LEFT JOIN hits h USING (day)
     ORDER BY s.day
   `, { enabled: ready });
@@ -567,11 +554,10 @@ export default function AccountUsageMonitoring() {
          .map((p) => `${p.instance_type}×${p.ducklings}`)
          .join(", ") || "—";
 
-  const identitiesFor = (workload: string, kind: "all" | "read") => {
+  const identitiesFor = (workload: string) => {
     const m = new Map<string, any>();
     for (const r of wkiRows) {
       if (r.workload !== workload) continue;
-      if (kind === "read" && r.read_queries === 0) continue;
       let e = m.get(r.user_name);
       if (!e) {
         e = { user_name: r.user_name, exec_s: 0, read_s: 0, write_s: 0, read_queries: 0,
@@ -586,7 +572,7 @@ export default function AccountUsageMonitoring() {
     }
     return [...m.values()]
       .map((e) => ({ ...e, sizes: sizeLabel(e.parts) }))
-      .sort((a, b) => (kind === "read" ? b.read_s - a.read_s : b.exec_s - a.exec_s));
+      .sort((a, b) => b.exec_s - a.exec_s);
   };
 
   const loadIdRows = rowsOf(loadsByIdentity.data).map((r) => ({
@@ -619,13 +605,6 @@ export default function AccountUsageMonitoring() {
 
   const identitiesForPattern = (p: string) =>
     loadIdRows.filter((r) => r.load_pattern === p).sort((a, b) => b.exec_s - a.exec_s);
-
-  const rRows = rowsOf(readsByWorkload.data).map((r) => ({
-    workload: S(r.workload), queries: N(r.queries), exec_s: N(r.exec_s),
-    pct_read_exec: N(r.pct_read_exec), p95_s: N(r.p95_s), queue_s: N(r.queue_s),
-    identities: N(r.identities), ducklings: N(r.ducklings), gb_downloaded: N(r.gb_downloaded),
-    gb_spilled: N(r.gb_spilled), errors: N(r.errors), last_active: S(r.last_active),
-  }));
 
   // --- chart ----------------------------------------------------------------
 
@@ -677,16 +656,17 @@ export default function AccountUsageMonitoring() {
     ? moverRows.reduce((a, b) => (Math.abs(b.delta_s) > Math.abs(a.delta_s) ? b : a))
     : null;
 
-  const cadRows = rowsOf(cadence.data).map((r) => ({
-    day: S(r.day).slice(5), active_hours: N(r.active_hours),
-    write_queries: N(r.write_queries), exec_s: N(r.exec_s),
+  const actRows = rowsOf(activity.data).map((r) => ({
+    day: S(r.day).slice(5), active_hours: N(r.active_hours), write_hours: N(r.write_hours),
+    write_s: N(r.write_s), read_s: N(r.read_s),
   }));
-  const maxHours = cadRows.reduce((m, r) => Math.max(m, r.active_hours), 0);
+  const maxHours = actRows.reduce((m, r) => Math.max(m, r.active_hours), 0);
+  const maxWriteHours = actRows.reduce((m, r) => Math.max(m, r.write_hours), 0);
 
   if (denied) {
     return (
       <div style={{ background: C.pageBg, minHeight: "100vh", padding: 24 }}>
-        <h1 style={{ fontSize: 20, color: C.text, margin: 0 }}>Account Usage Monitoring</h1>
+        <h1 style={{ fontSize: 20, color: C.text, margin: 0 }}>Overall Usage Monitoring</h1>
         <div style={{ background: "#fce8e6", color: C.red, border: `1px solid ${C.red}`, borderRadius: 8, padding: 16, marginTop: 16, fontSize: 13 }}>
           <strong>QUERY_HISTORY is not readable by this account.</strong>
           <p style={{ marginTop: 6 }}>It requires an organization admin on a Business plan.</p>
@@ -699,7 +679,7 @@ export default function AccountUsageMonitoring() {
     <div style={{ background: C.pageBg, minHeight: "100vh", padding: 24, color: C.text }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
-          <h1 style={{ fontSize: 20, margin: 0, fontWeight: 500 }}>Account Usage Monitoring</h1>
+          <h1 style={{ fontSize: 20, margin: 0, fontWeight: 500 }}>Overall Usage Monitoring</h1>
           <p style={{ color: C.muted, fontSize: 13, margin: "4px 0 0" }}>
             Every query in the org, classified into exactly one workload — so the shares add to 100%.
           </p>
@@ -803,7 +783,7 @@ export default function AccountUsageMonitoring() {
                 { key: "queue_s",   label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
                 { key: "last_active", label: "Last active" },
               ]}
-              rows={identitiesFor(r.workload, "all")}
+              rows={identitiesFor(r.workload)}
               empty="No identities in this window."
               limit={TOP_N} expanded={wDetailAll} onToggle={() => setWDetailAll(!wDetailAll)}
             />
@@ -837,52 +817,6 @@ export default function AccountUsageMonitoring() {
           onSort={sortToggle(iSort, setISort, iDir, setIDir)}
           limit={TOP_N} expanded={iAll} onToggle={() => setIAll(!iAll)}
           empty="No traffic in this window."
-        />
-      </Card>
-
-      <Card title="Read compute"
-            note="Reads only (query_type = 'QUERY'), by workload. Reads usually dominate COMPUTE while writes dominate query COUNT, which is why this is its own section. p95 is per-query latency, and spill to disk means a read exceeded memory — the two signals that separate “expensive because there is a lot of it” from “expensive because it is badly shaped”. Click a row for the identities reading through that surface.">
-        <SortTable
-          cols={[
-            { key: "workload",      label: "Workload" },
-            { key: "exec_s",        label: "Read compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
-            { key: "pct_read_exec", label: "Share of reads", num: true, fmt: (v: any) => `${N(v).toFixed(1)}%` },
-            { key: "queries",       label: "Reads", num: true, fmt: (v: any) => fmtNum(N(v)) },
-            { key: "p95_s",         label: "p95", num: true, fmt: (v: any) => `${N(v).toFixed(2)}s` },
-            { key: "queue_s",       label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
-            { key: "identities",    label: "Readers", num: true },
-            { key: "ducklings",     label: "Ducklings", num: true },
-            { key: "gb_downloaded", label: "Downloaded", num: true, fmt: (v: any) => fmtGb(N(v)) },
-            { key: "gb_spilled",    label: "Spilled", num: true, fmt: (v: any) => fmtGb(N(v)),
-              tone: (v: any) => (N(v) > 0 ? C.red : undefined) },
-            { key: "errors",        label: "Errors", num: true, tone: (v: any) => (N(v) > 0 ? C.red : undefined) },
-            { key: "last_active",   label: "Last active", ts: true },
-          ]}
-          rows={rRows}
-          loading={probe.isLoading || readsByWorkload.isLoading}
-          sortKey={rSort} dir={rDir}
-          onSort={sortToggle(rSort, setRSort, rDir, setRDir)}
-          limit={TOP_N} expanded={rAll} onToggle={() => setRAll(!rAll)}
-          onRowClick={(w: string) => { setReadFocus(readFocus === w ? "" : w); setRDetailAll(false); }}
-          activeRow={readFocus}
-          renderDetail={(r: any) => (
-            <Detail
-              label={`Identities reading through ${r.workload} — duckling counts and sizes cover all their activity on this surface, not reads alone`}
-              cols={[
-                { key: "user_name",    label: "Identity" },
-                { key: "read_s",       label: "Read compute", num: true, fmt: (v: any) => fmtSec(N(v)) },
-                { key: "read_queries", label: "Reads", num: true, fmt: (v: any) => fmtNum(N(v)) },
-                { key: "ducklings",    label: "Ducklings", num: true },
-                { key: "sizes",        label: "Instance sizes" },
-                { key: "queue_s",      label: "Queue", num: true, fmt: (v: any) => fmtSec(N(v)) },
-                { key: "last_active",  label: "Last active" },
-              ]}
-              rows={identitiesFor(r.workload, "read")}
-              empty="No readers in this window."
-              limit={TOP_N} expanded={rDetailAll} onToggle={() => setRDetailAll(!rDetailAll)}
-            />
-          )}
-          empty="No reads in this window."
         />
       </Card>
 
@@ -922,33 +856,41 @@ export default function AccountUsageMonitoring() {
         />
       </Card>
 
-      <Card title="Load cadence"
-            note="Distinct clock hours per day that contained a write — a schedule you can read without knowing the cron. 1–2 is a nightly batch; ~24 is an hourly job. If this jumps to 24 while data volume is flat, a full refresh got rescheduled more often, and that is the expensive version of the mistake.">
-        {probe.isLoading || cadence.isLoading ? <Skel h={220} /> : (
+      <Card title="Active hours"
+            note="Distinct clock hours per day in which the account ran anything, with the read and write compute behind them. Because it counts distinct hours it is timezone-independent, and it reads as a schedule without knowing the cron: 1–2 active hours is a nightly batch, ~24 is something running continuously. The shape of the write line is the cost signal — write compute climbing while data volume is flat means a full refresh got rescheduled more often, which is the expensive version of the mistake.">
+        {probe.isLoading || activity.isLoading ? <Skel h={240} /> : (
           <>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={cadRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart data={actRows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
                 <CartesianGrid stroke="#f1f3f4" vertical={false} />
                 <XAxis dataKey="day" tick={{ fill: C.muted, fontSize: 11 }}
                        axisLine={{ stroke: C.border }} tickLine={false} minTickGap={16} />
+                {/* Hours are bounded 0-24; compute is unbounded. Separate axes, or
+                    the hours line flattens onto the floor. */}
                 <YAxis yAxisId="h" domain={[0, 24]} ticks={[0, 6, 12, 18, 24]} width={40}
                        tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
-                <YAxis yAxisId="s" orientation="right" width={52}
+                <YAxis yAxisId="s" orientation="right" width={56}
                        tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false}
                        tickFormatter={(v: number) => fmtSec(v)} />
                 <Tooltip contentStyle={{ border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 12 }}
-                         formatter={(v: any, n: any) => (n === "Write compute" ? fmtSec(N(v)) : String(N(v)))} />
+                         formatter={(v: any, n: any) =>
+                           (n === "Active hours" ? `${N(v)} of 24` : fmtSec(N(v)))} />
                 <Legend wrapperStyle={{ fontSize: 12, color: C.muted }} />
                 <Line yAxisId="h" type="stepAfter" dataKey="active_hours" name="Active hours"
                       stroke={C.blue} strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line yAxisId="s" type="monotone" dataKey="exec_s" name="Write compute"
-                      stroke={C.blueLight} strokeWidth={2} dot={false} isAnimationActive={false}
+                <Line yAxisId="s" type="monotone" dataKey="write_s" name="Write compute"
+                      stroke={C.blue} strokeWidth={2} dot={false} isAnimationActive={false}
+                      strokeDasharray="4 3" />
+                <Line yAxisId="s" type="monotone" dataKey="read_s" name="Read compute"
+                      stroke={C.red} strokeWidth={2} dot={false} isAnimationActive={false}
                       strokeDasharray="4 3" />
               </LineChart>
             </ResponsiveContainer>
             <p style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>
-              Peak in this window: <strong style={{ color: C.text }}>{maxHours}</strong> of 24 hours had writes
-              {maxHours >= 20 ? " — an hourly-or-finer schedule." : maxHours <= 3 ? " — a batch schedule." : "."}
+              Peak in this window: <strong style={{ color: C.text }}>{maxHours}</strong> of 24 hours
+              active, <strong style={{ color: C.text }}>{maxWriteHours}</strong> of them containing writes
+              {maxWriteHours >= 20 ? " — an hourly-or-finer write schedule."
+                : maxWriteHours <= 3 ? " — a batch write schedule." : "."}
             </p>
           </>
         )}
@@ -972,7 +914,7 @@ export default function AccountUsageMonitoring() {
         <br /><br />
         <strong>Ideas from here:</strong> once <em>External app / SDK</em> dominates, the next move is
         not a query — it is giving each pipeline its own service account, which turns “By identity”
-        into a per-pipeline cost report. Or promote <em>Load cadence</em> to a Flight that writes a
+        into a per-pipeline cost report. Or promote <em>Active hours</em> to a Flight that writes a
         row when <code>active_hours</code> jumps, turning a monthly bill surprise into a next-morning
         notification.
       </p>

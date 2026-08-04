@@ -1,6 +1,6 @@
--- Account usage monitoring
+-- Overall usage monitoring
 --
--- The exact queries behind the "Account Usage Monitoring" dive, ready to paste
+-- The exact queries behind the "Overall Usage Monitoring" dive, ready to paste
 -- into a MotherDuck notebook. Change `INTERVAL 30 DAY` to widen or narrow the
 -- window.
 --
@@ -97,10 +97,9 @@ ORDER BY exec_s DESC;
 
 
 -- 1b. Drill-down: workload x identity x duckling size -------------------------
--- What the dive expands under a clicked "By workload" row, and reused for the
--- read drill-down. The grain is small by construction — about 125 rows over 90
--- days in a busy org — so the dive fetches it ONCE and rolls it up in the
--- browser instead of re-querying per click.
+-- What the dive expands under a clicked "By workload" row. The grain is small by
+-- construction — about 125 rows over 90 days in a busy org — so the dive fetches
+-- it ONCE and rolls it up in the browser instead of re-querying per click.
 --
 -- count(DISTINCT duckling_id) at this grain is exact per size. Summing across
 -- sizes for one identity is exact too, UNLESS a duckling was resized mid-window,
@@ -393,52 +392,15 @@ ORDER BY queries DESC
 LIMIT 15;
 
 
--- 7. Read compute by workload -------------------------------------------------
--- The mirror of query 6. Reads and writes are wildly asymmetric — writes usually
--- dominate query COUNT while reads dominate COMPUTE — so a single table with a
--- filter buries whichever one you are not looking at.
+-- 7. Read vs write, so the split in the dive header is checkable ---------------
+-- Reads are query_type = 'QUERY'; writes are DDL + DML. TCL (transaction
+-- control) is NEITHER, which is why read% + write% falls a hair short of 100.
+-- The dive states that residue instead of rounding it away.
 --
--- p95_s and gb_spilled are the two columns that separate "expensive because
--- there is a lot of it" from "expensive because it is badly shaped". Spill means
--- a read exceeded memory and went to disk; a high p95 with low volume is a
--- query-shape problem, not a scheduling one.
---
--- Reads are query_type = 'QUERY'. Note this is computed at workload grain rather
--- than derived from query 1b: quantile_cont and count(DISTINCT duckling_id) do
--- not roll up correctly from a finer grain.
-SELECT
-  CASE
-    WHEN user_agent LIKE '%md-flights%'            THEN 'Flight'
-    WHEN user_agent LIKE '%md-dives-mcp-app%'      THEN 'Dive (MCP app)'
-    WHEN user_agent LIKE '%md-dive-embed%'         THEN 'Dive (embedded)'
-    WHEN user_agent LIKE '%md-dive%'               THEN 'Dive (MotherDuck UI)'
-    WHEN user_agent LIKE '%mcp-server-motherduck%' THEN 'MCP server'
-    WHEN user_agent LIKE '%hatchling%'             THEN 'Notebook UI'
-    WHEN user_agent LIKE '%pgendpoint%'            THEN 'Postgres endpoint'
-    WHEN user_agent LIKE '%dbt%'                   THEN 'dbt'
-    WHEN user_agent LIKE '%cli%'                   THEN 'DuckDB CLI'
-    WHEN user_agent LIKE '%motherduck-wasm%'       THEN 'MotherDuck UI (other)'
-    ELSE 'External app / SDK'
-  END                                                     AS workload,
-  count(*)                                                AS queries,
-  round(sum(epoch(execution_time)), 1)                    AS exec_s,
-  round(100.0 * sum(epoch(execution_time))
-        / sum(sum(epoch(execution_time))) OVER (), 1)     AS pct_read_exec,
-  round(quantile_cont(epoch(execution_time), 0.95), 2)    AS p95_s,
-  round(sum(epoch(wait_time)), 1)                         AS queue_s,
-  count(DISTINCT user_name)                               AS identities,
-  count(DISTINCT duckling_id)                             AS ducklings,
-  round(sum(bytes_downloaded) / 1e9, 2)                   AS gb_downloaded,
-  round(sum(bytes_spilled_to_disk) / 1e9, 2)              AS gb_spilled,
-  count(*) FILTER (error_message IS NOT NULL)             AS errors,
-  max(start_time)                                         AS last_active
-FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
-WHERE start_time > now() - INTERVAL 30 DAY
-  AND query_type = 'QUERY'
-GROUP BY ALL
-ORDER BY exec_s DESC;
-
--- Read vs write vs neither, so the split in the dive header is checkable.
+-- Per-workload read and write compute are columns on query 1 rather than a
+-- section of their own — reads and writes are asymmetric (writes dominate query
+-- COUNT, reads dominate COMPUTE), but they answer the same question about the
+-- same rows, so splitting them into two tables just hides one of them.
 SELECT
   CASE WHEN query_type = 'QUERY'            THEN 'read'
        WHEN query_type IN ('DDL', 'DML')    THEN 'write'
@@ -453,25 +415,35 @@ GROUP BY ALL
 ORDER BY exec_s DESC;
 
 
--- 8. Load cadence: how often is the pipeline actually running? ----------------
--- `active_hours` is the number of distinct clock hours in the day that contained
--- a write. It reads as a schedule without needing to know the cron:
+-- 8. Active hours: when was the account doing anything, and what kind? ---------
+-- `active_hours` is the number of distinct clock hours in the day containing ANY
+-- query; `write_hours` narrows that to hours containing a write. Either reads as
+-- a schedule without needing to know the cron:
 --   1-2   -> a nightly batch
---   ~24   -> an hourly job
---   24 and rising exec_s at flat data volume -> a full refresh that got
---            rescheduled more often, which is the expensive mistake
+--   ~24   -> something running continuously
+--
+-- The cost signal is the SHAPE of write_s against flat data volume: write compute
+-- climbing while the data does not means a full refresh got rescheduled more
+-- often, which is the expensive version of the mistake.
 --
 -- Timezone-independent by construction: it counts distinct hours, so it does not
 -- matter which zone the session renders start_time in.
+--
+-- The dive plots active_hours on a 0-24 left axis and write_s / read_s on a
+-- right axis, because hours are bounded and compute is not.
 SELECT
-  date_trunc('day', start_time)::DATE            AS day,
-  count(DISTINCT date_trunc('hour', start_time)) AS active_hours,
-  count(*)                                       AS write_queries,
-  round(sum(epoch(execution_time)), 1)           AS exec_s,
-  count(DISTINCT user_name)                      AS identities
+  date_trunc('day', start_time)::DATE                  AS day,
+  count(DISTINCT date_trunc('hour', start_time))       AS active_hours,
+  count(DISTINCT date_trunc('hour', start_time))
+    FILTER (query_type IN ('DDL', 'DML'))              AS write_hours,
+  round(coalesce(sum(epoch(execution_time))
+        FILTER (query_type IN ('DDL', 'DML')), 0), 1)  AS write_s,
+  round(coalesce(sum(epoch(execution_time))
+        FILTER (query_type = 'QUERY'), 0), 1)          AS read_s,
+  count(*)                                             AS queries,
+  count(DISTINCT user_name)                            AS identities
 FROM MD_INFORMATION_SCHEMA.QUERY_HISTORY
 WHERE start_time > now() - INTERVAL 30 DAY
-  AND query_type IN ('DDL', 'DML')
 GROUP BY ALL
 ORDER BY day DESC;
 

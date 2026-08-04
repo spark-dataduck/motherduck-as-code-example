@@ -110,8 +110,21 @@ isn't sortable at all.
 - Percentages: one decimal, `%` suffix.
 - Timestamps in tables: trim to minutes. Seconds are noise in a rollup.
 
-## The exception
+## The exceptions
 
-`Agent Commerce Overview` uses a dark, branded canvas. That is deliberate — it
-is a product overview, not a monitoring dashboard. Everything analytical in this
-account uses the light palette above.
+Both are deliberate and named here, because an undocumented exception is
+indistinguishable from a mistake.
+
+**`Agent Commerce Overview` uses a dark, branded canvas.** It is a product
+overview, not a monitoring dashboard. Everything analytical in this account uses
+the light palette above.
+
+**`Overall Usage Monitoring` uses red for read compute** in its "Active hours"
+chart, against blue for write compute — the one place in this account where a
+semantic colour marks a category. Read-vs-write is that dive's central
+dichotomy, the two series share one axis, and `blue` vs `blueLight` is not
+separable enough on a dashed line at dashboard size. Treat this as licensed for
+a genuine two-way opposition carrying the dive's main argument, not as
+permission to colour categories generally: for three or more categories, or for
+categories that are merely different rather than opposed, use one accent against
+the neutral ramp (as that dive's stacked chart does).

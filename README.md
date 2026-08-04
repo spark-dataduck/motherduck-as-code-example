@@ -10,7 +10,7 @@ The artifacts are just a vehicle. **What this repository is actually showing you
 | --- | --- |
 | Database + share | `agent_commerce` |
 | Flight | `agent-commerce-monthly-rollup` |
-| Dives | `Agent Commerce Overview` · `Account Usage Monitoring` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
+| Dives | `Agent Commerce Overview` · `Overall Usage Monitoring` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
 | Guides | `MotherDuck as Code — orientation` · `Agent commerce metrics` · `Revenue run-rate and trend` · `Usage monitoring with QUERY_HISTORY` · `Dive conventions` · `Flight conventions` |
 
 ---
