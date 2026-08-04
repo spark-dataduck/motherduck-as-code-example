@@ -1,6 +1,6 @@
 # MotherDuck as Code — a worked example
 
-Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. A **Flight**, four **Dives**, five **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
+Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. A **Flight**, five **Dives**, six **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
 
 The artifacts are just a vehicle. **What this repository is actually showing you is the mechanics**: how a deploy decides between creating and updating, how file contents get into a table function, why order matters, and which parts drift if you don't reconcile them.
 
@@ -10,8 +10,8 @@ The artifacts are just a vehicle. **What this repository is actually showing you
 | --- | --- |
 | Database + share | `agent_commerce` |
 | Flight | `agent-commerce-monthly-rollup` |
-| Dives | `Agent Commerce Overview` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
-| Guides | `MotherDuck as Code — orientation` · `Agent commerce metrics` · `Usage monitoring with QUERY_HISTORY` · `Dive conventions` · `Flight conventions` |
+| Dives | `Agent Commerce Overview` · `Account Usage Monitoring` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
+| Guides | `MotherDuck as Code — orientation` · `Agent commerce metrics` · `Revenue run-rate and trend` · `Usage monitoring with QUERY_HISTORY` · `Dive conventions` · `Flight conventions` |
 
 ---
 
@@ -114,11 +114,12 @@ Dive status (`MD_UPDATE_DIVE_STATUS`) is *not* reconciled here, so a Dive promot
 Guides deploy into a **topic tree**, because that's how an agent finds them without paying to load all of them. It calls `list_guides(topic)`, reads the topic names and counts, and opens only what looks relevant — progressive disclosure.
 
 ```
-(root)                     MotherDuck as Code — orientation
-agent-commerce/            Agent commerce metrics
-platform-observability/    Usage monitoring with QUERY_HISTORY
-dives/                     Dive conventions            ← reserved topic
-flights/                   Flight conventions          ← reserved topic
+(root)                       MotherDuck as Code — orientation
+agent-commerce/              Agent commerce metrics
+agent-commerce/forecasting/  Revenue run-rate and trend
+platform-observability/      Usage monitoring with QUERY_HISTORY
+dives/                       Dive conventions            ← reserved topic
+flights/                     Flight conventions          ← reserved topic
 ```
 
 - **The root is for the one guide always worth loading.** Untopiced guides appear in *every* overview, so they cost tokens every session. The orientation guide earns it by being a map — what lives where, which topic to open next — not a manual.

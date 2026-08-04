@@ -30,6 +30,12 @@
       ]
     },
     {
+      "title": "Account Usage Monitoring",
+      "source": "dives/account-usage-monitoring/dive.tsx",
+      "description": "Account-wide compute from MD_INFORMATION_SCHEMA.QUERY_HISTORY, with every query classified into exactly one workload, attributed by identity, and split into full-refresh vs incremental load patterns. The entry point above the per-surface monitoring dives.",
+      "required_resources": []
+    },
+    {
       "title": "Dive Usage Monitoring",
       "source": "dives/dive-usage-monitoring/dive.tsx",
       "description": "Compute attributed to Dives, split by viewing surface (MotherDuck UI, embedded, MCP app), from MD_INFORMATION_SCHEMA.QUERY_HISTORY joined to MD_LIST_DIVES.",
