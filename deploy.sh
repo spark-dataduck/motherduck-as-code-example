@@ -80,9 +80,11 @@ plan_line()  { printf '%-8s %-14s %s\n' "$1" "$2" "$3"; }
 
 # --- plan -------------------------------------------------------------------
 plan() {
-  local name title topic id
+  local name title topic id count
   echo "ACTION   TYPE           NAME"
 
+  count=$(jq -r '.flights | length' "$MANIFEST")
+  [[ "$count" -gt 0 ]] || { echo "ERROR: manifest declares no flights" >&2; exit 1; }
   while IFS= read -r name; do
     id=$(lookup_flight "$name"); require_single "$id" "$name"
     plan_line "$(action_for "$id")" flight "$name"
@@ -108,6 +110,7 @@ plan() {
 deploy_flight() {
   local count i name src reqs cron cfg secrets run_on_deploy id
   count=$(jq -r '.flights | length' "$MANIFEST")
+  [[ "$count" -gt 0 ]] || { echo "ERROR: manifest declares no flights" >&2; exit 1; }
 
   for (( i = 0; i < count; i++ )); do
     name=$(jq -r ".flights[$i].name"          "$MANIFEST")
@@ -150,10 +153,15 @@ deploy_flight() {
       md -c "$preamble FROM MD_UPDATE_FLIGHT(flight_id => '$id'::UUID, $args);" >/dev/null
     fi
 
-    if [[ "$run_on_deploy" != "true" ]]; then
-      echo "  Skipping run for '$name' (run_on_deploy=false)."
-      continue
-    fi
+    case "$run_on_deploy" in
+      true) ;;
+      false)
+        echo "  Skipping run for '$name' (run_on_deploy=false)."
+        continue ;;
+      *)
+        echo "ERROR: run_on_deploy for '$name' must be true or false, got '$run_on_deploy'." >&2
+        exit 1 ;;
+    esac
 
     echo "Running flight '$name'..."
     md -c "FROM MD_RUN_FLIGHT(flight_id => '$id'::UUID);" >/dev/null
