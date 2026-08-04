@@ -1,6 +1,6 @@
 # MotherDuck as Code — a worked example
 
-Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. A **Flight**, five **Dives**, six **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
+Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. Two **Flights**, five **Dives**, six **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
 
 The artifacts are just a vehicle. **What this repository is actually showing you is the mechanics**: how a deploy decides between creating and updating, how file contents get into a table function, why order matters, and which parts drift if you don't reconcile them.
 
@@ -9,7 +9,7 @@ The artifacts are just a vehicle. **What this repository is actually showing you
 | Artifact | Name |
 | --- | --- |
 | Database + share | `agent_commerce` |
-| Flight | `agent-commerce-monthly-rollup` |
+| Flight | `agent-commerce-monthly-rollup` · `gdrive-sheets-sync` |
 | Dives | `Agent Commerce Overview` · `Overall Usage Monitoring` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
 | Guides | `MotherDuck as Code — orientation` · `Agent commerce metrics` · `Revenue run-rate and trend` · `Usage monitoring with QUERY_HISTORY` · `Dive conventions` · `Flight conventions` |
 

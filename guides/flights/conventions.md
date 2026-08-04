@@ -21,6 +21,18 @@ without loading the rest of the catalog.
   `MOTHERDUCK_TOKEN`; do not build a connection string with a token in it.
 - **A Flight writes to `agent_commerce_marts`, never to `agent_commerce`.** The
   source database is a read-only share.
+- **A Flight is one file.** `MD_CREATE_FLIGHT.source_code` takes a single-file
+  program capped at 200 KB, so there are no helper modules. Pure logic lives in
+  `flight.py` and tests import it by path via `importlib`.
+- **Secrets are referenced by name, never committed.** A manifest entry's
+  `secrets` array becomes `flight_secret_names`; each key in the secret's
+  `PARAMS` map arrives as an environment variable. Create the secret once by
+  hand (`CREATE SECRET … (TYPE flights, PARAMS MAP {…})`); the repo only names it.
+- **`run_on_deploy: false` deploys a Flight without running it.** Default is
+  `true`, which is right for `agent-commerce-monthly-rollup` because a Dive
+  depends on the database it creates. Set it `false` when a Flight calls an
+  external API whose credentials CI may not have — a failed run would
+  otherwise fail the whole deploy.
 
 ## Shape of a Flight
 

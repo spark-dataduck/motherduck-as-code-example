@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A worked example of managing MotherDuck resources as code: one Flight, five Dives, six Guides, and a share — all declared in `manifest.json` and reconciled by `deploy.sh`, which calls the `MD_*` SQL functions through the DuckDB CLI. There is no framework, no state file, and no committed resource IDs.
+A worked example of managing MotherDuck resources as code: two Flights, five Dives, six Guides, and a share — all declared in `manifest.json` and reconciled by `deploy.sh`, which calls the `MD_*` SQL functions through the DuckDB CLI. There is no framework, no state file, and no committed resource IDs.
 
 The artifacts are a vehicle; the repository's real subject is the deploy mechanics. Prose in `README.md` and the guides is part of the deliverable — keep it accurate when you change behavior.
 
@@ -16,7 +16,15 @@ The monitoring dives read **only surfaces a customer can reach** — `MD_INFORMA
 
 ## Commands
 
-There is no build, test, or lint step. The DuckDB CLI and `jq` are the only dependencies, and `MOTHERDUCK_TOKEN` must be set.
+Unit tests cover the pure helpers in `flights/gdrive-sheets-sync/flight.py`
+(naming, slugification, SQL quoting). CI runs them before deploying.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+The DuckDB CLI and `jq` are the only dependencies, and `MOTHERDUCK_TOKEN` must be set.
 
 ```bash
 ./deploy.sh --dry-run          # print the create/update plan, mutate nothing
@@ -95,6 +103,18 @@ This applies to reads too — resolve an ID into a variable before `MD_GET_DIVE`
 - Config comes from the manifest `config` map, surfaced as same-named environment variables. Use UPPERCASE keys. Never put a secret there; use Flight secrets.
 - Connect with `duckdb.connect("md:")` — the runtime injects the token.
 - Flights write to `agent_commerce_marts`. `agent_commerce` is a read-only share.
+- **A Flight is one file.** `MD_CREATE_FLIGHT.source_code` takes a single-file
+  program capped at 200 KB, so there are no helper modules. Pure logic lives in
+  `flight.py` and tests import it by path via `importlib`.
+- **Secrets are referenced by name, never committed.** A manifest entry's
+  `secrets` array becomes `flight_secret_names`; each key in the secret's
+  `PARAMS` map arrives as an environment variable. Create the secret once by
+  hand (`CREATE SECRET … (TYPE flights, PARAMS MAP {…})`); the repo only names it.
+- **`run_on_deploy: false` deploys a Flight without running it.** Default is
+  `true`, which is right for `agent-commerce-monthly-rollup` because a Dive
+  depends on the database it creates. Set it `false` when a Flight calls an
+  external API whose credentials CI may not have — a failed run would otherwise
+  fail the whole deploy.
 
 See `guides/flights/conventions.md`.
 

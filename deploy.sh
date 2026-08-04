@@ -116,7 +116,9 @@ deploy_flight() {
     name=$(jq -r ".flights[$i].name"          "$MANIFEST")
     src=$( jq -r ".flights[$i].source"        "$MANIFEST")
     reqs=$(jq -r ".flights[$i].requirements"  "$MANIFEST")
-    cron=$(jq -r ".flights[$i].schedule_cron" "$MANIFEST")
+    # `// ""` is safe here where `// true` was not: in jq only null and false are
+    # falsy, so an empty-string cron survives `//` — unlike a boolean false.
+    cron=$(jq -r ".flights[$i].schedule_cron // \"\"" "$MANIFEST")
     run_on_deploy=$(jq -r ".flights[$i] | if has(\"run_on_deploy\") then .run_on_deploy else true end" "$MANIFEST")
 
     # Build a DuckDB MAP literal from the config object: MAP { 'K': 'V', ... }
@@ -139,10 +141,11 @@ deploy_flight() {
       name              => '$name',
       source_code       => getvariable('source_code'),
       requirements_txt  => getvariable('requirements_txt'),
-      schedule_cron     => '$cron',
       config            => MAP { $cfg }"
     [[ -n "$secrets" ]] && args="$args,
       flight_secret_names => $secrets"
+    [[ -n "$cron" ]] && args="$args,
+      schedule_cron     => '$cron'"
 
     if [[ -z "$id" ]]; then
       echo "Creating flight '$name'..."

@@ -11,6 +11,24 @@
         "TARGET_DATABASE": "agent_commerce_marts",
         "TARGET_TABLE": "monthly_spend"
       }
+    },
+    {
+      "name": "gdrive-sheets-sync",
+      "source": "flights/gdrive-sheets-sync/flight.py",
+      "requirements": "flights/gdrive-sheets-sync/requirements.txt",
+      "run_on_deploy": false,
+      "secrets": ["gsheets"],
+      "config": {
+        "ROOT_FOLDER_IDS": "[]",
+        "TARGET_DATABASE": "google_drive",
+        "EXCLUDE_FOLDER_IDS": "[]",
+        "EXCLUDE_PATTERNS": "[]",
+        "ALL_VARCHAR": "true",
+        "DISCOVER_ONLY": "true",
+        "FAIL_ON_COLLISION": "true",
+        "MAX_ATTEMPTS": "5",
+        "RETRY_BASE_SECONDS": "2"
+      }
     }
   ],
   "dives": [
