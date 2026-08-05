@@ -19,7 +19,7 @@ The artifacts are just a vehicle. **What this repository is actually showing you
 
 ## 1. One manifest holds the desired state
 
-`manifest.json` is the only file you edit to change what deploys. It names every artifact, points at its source file, and declares the properties the repository owns — a Flight's schedule and config, a Dive's `required_resources` and `status`, a Guide's topic and visibility.
+`manifest.json` is the only file you edit to change what deploys. It names every artifact, points at its source file, and declares the properties the repository owns — a Flight's schedule, config, and secret names, a Dive's `required_resources` and `status`, a Guide's topic and visibility.
 
 Everything else follows from it. `deploy.sh` reads the manifest, and nothing is hardcoded in the script that a user would reasonably want to change.
 
@@ -82,13 +82,53 @@ No heredocs, no dollar-quoting, no shell-escaping a 25 KB `.tsx`. The same trick
 
 ## 4. Deploy order is load-bearing
 
-**Flight → run it → Dives → Guides.**
+**Flights → run the ones that opt in → Dives → Guides.**
 
 The `Agent Commerce Overview` Dive declares `md:agent_commerce_marts` in its `required_resources` — a database the Flight creates. Publish the Dive first and it references a table that doesn't exist yet, so `deploy.sh` waits for the Flight run to reach `RUN_STATUS_SUCCEEDED` before touching any Dive.
 
 That prefix matters: run statuses are `RUN_STATUS_SUCCEEDED` / `_FAILED` / `_CANCELLED`. Comparing against a bare `SUCCEEDED` is valid code that never matches, so a wait loop written that way hangs until timeout and then fails a run that actually succeeded.
 
-## 5. Reconcile, don't just create
+Not every Flight wants that. `run_on_deploy` decides per Flight whether the deploy runs it and blocks on the result — see the next section.
+
+## 5. Flights are configured from the manifest, secrets included
+
+The two Flights do unrelated jobs, and every difference between them lives in their manifest entries rather than in `deploy.sh`:
+
+- **`agent-commerce-monthly-rollup`** reads the `agent_commerce` share and rebuilds `agent_commerce_marts.monthly_spend`, weekly.
+- **`gdrive-sheets-sync`** walks Google Drive folder trees, expands every tab of every Google Sheet it finds, and loads each one into `google_drive`, daily.
+
+**`config` becomes environment variables.** Each key in the manifest's `config` map is passed through as `MAP { 'KEY': 'VALUE' }` and surfaced to `flight.py` under the same name, so keys are UPPERCASE by convention. Values are always strings — a list travels as a JSON-encoded string the Flight parses (`ROOT_FOLDER_IDS`, `EXCLUDE_PATTERNS`). Nothing sensitive belongs here; `config` is committed.
+
+**Secrets are referenced by name, never committed.** Create the secret once, by hand:
+
+```sql
+CREATE SECRET gsheets IN MOTHERDUCK (
+  TYPE FLIGHTS,
+  PARAMS MAP { 'SERVICE_ACCOUNT_JSON': '{"type":"service_account", ...}' }
+);
+```
+
+The repository only names it — `"secrets": ["gsheets"]` in the manifest becomes `flight_secret_names => ['gsheets']` on the create or update. At runtime every key in that `PARAMS` map arrives as an environment variable **twice**: namespaced as `gsheets_SERVICE_ACCOUNT_JSON` (the secret's name, case preserved, not upper-cased) and again bare as `SERVICE_ACCOUNT_JSON`. Prefer the namespaced form, because bare names can collide between two attached secrets, or with a `config` key.
+
+**`run_on_deploy: false` deploys a Flight without running it.** The default is `true`, which is what `agent-commerce-monthly-rollup` needs — the Dive deployed next reads the database that run creates. `gdrive-sheets-sync` sets it `false`:
+
+```
+Updating flight 'gdrive-sheets-sync' (a2f1c0d4-…)...
+  Skipping run for 'gdrive-sheets-sync' (run_on_deploy=false).
+```
+
+It calls the Google Drive API, and a run that fails for credentials CI may not hold would fail the *entire* deploy — including the Dives and Guides that have nothing to do with it. Its own `DISCOVER_ONLY=true` config covers the safe-check case instead: walk Drive, resolve and print every target table name, then return before connecting to MotherDuck at all.
+
+**A Flight is one file, so the tests reach into it.** `MD_CREATE_FLIGHT.source_code` takes a single-file program capped at 200 KB — there are no helper modules to import. The pure logic (slugification, table naming, config parsing, SQL quoting) lives in `flight.py`, and `tests/` loads it by path with `importlib`:
+
+```bash
+pip install pytest==8.3.3
+python -m pytest tests/ -v
+```
+
+CI runs that in a job the deploy job depends on, so a naming-rule regression fails the pull request before anything touches MotherDuck.
+
+## 6. Reconcile, don't just create
 
 Setting a property at creation makes the repository the source of truth *once*. Checking it on every run makes it the source of truth *continuously*. The test: **if someone changed this in the UI, would the next deploy notice?**
 
@@ -110,13 +150,15 @@ Updating dive 'Overall Usage Monitoring' (bbeee0e7-…)...
 
 A Dive with no `status` declared is skipped rather than defaulted, because defaulting to `draft` would silently demote a Dive someone had endorsed. Declaring nothing means claiming nothing.
 
-## 6. Three sharp edges of name-based identity
+**One hole is left open on purpose.** A Flight's `schedule_cron` and `secrets` are *declared, not reconciled*. `MD_UPDATE_FLIGHT` is a PATCH — omit an argument and the stored value is left untouched, which is exactly what happens when a manifest entry carries no `schedule_cron`. So a schedule someone adds by hand in the UI survives every subsequent deploy, and deleting `schedule_cron` from the manifest does not unschedule anything. Closing it needs a read-modify-write: read the current schedule from `MD_LIST_FLIGHTS()` and send `schedule_cron := ''` only when there *is* one to clear, because blanking a Flight that has no schedule returns an error. The point isn't that every property must be reconciled — it's knowing which of yours are and which aren't.
+
+## 7. Three sharp edges of name-based identity
 
 1. **Renaming creates a second artifact.** The lookup on the new name finds nothing, so the deployer creates and the old one is orphaned. This happened here: retitling `Agent commerce Dive style` to `Dive conventions` left an orphan in the `dives` topic that had to be deleted by hand.
 2. **Duplicate names fail the deploy** with a non-zero exit rather than guessing which to update. A Dive built by hand in the UI sharing a title will break CI.
 3. **`MD_LIST_*` is identity-scoped, so deploy with a service account token — not a personal one.** Each identity sees only its own artifacts, so switching tokens makes the next run find no match and create a second set. A dedicated service account keeps the upsert stable and keeps the artifacts owned by automation rather than by one person's account.
 
-## 7. Organizing Guides with topics
+## 8. Organizing Guides with topics
 
 Guides deploy into a **topic tree**, because that's how an agent finds them without paying to load all of them. It calls `list_guides(topic)`, reads the topic names and counts, and opens only what looks relevant — progressive disclosure.
 
@@ -143,9 +185,10 @@ Each monitoring dive ships a `queries.sql` beside it with the exact queries it r
 
 | File | What it answers |
 | --- | --- |
+| [`dives/overall-usage-monitoring/queries.sql`](dives/overall-usage-monitoring/queries.sql) | Account-wide compute, every query classified into exactly one workload and attributed by identity — the entry point for the three below |
 | [`dives/dive-usage-monitoring/queries.sql`](dives/dive-usage-monitoring/queries.sql) | Which Dives drive compute, on whose ducklings, from which surface |
 | [`dives/mcp-usage-monitoring/queries.sql`](dives/mcp-usage-monitoring/queries.sql) | Which MCP clients and users are querying, and how much |
 | [`dives/flight-usage-monitoring/queries.sql`](dives/flight-usage-monitoring/queries.sql) | Flight inventory and run health, plus a query that *generates* the fan-out query |
 
-These read only customer-accessible surfaces — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions — so they run in your own account unchanged. The first two need org admin on a Business plan; the Flight one is scoped to the calling identity.
+These read only customer-accessible surfaces — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions — so they run in your own account unchanged. The first three need org admin on a Business plan; the Flight one is scoped to the calling identity.
 
