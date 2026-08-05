@@ -20,8 +20,9 @@
       "run_on_deploy": false,
       "secrets": ["gsheets"],
       "_doc": {
-        "run_on_deploy": "false = deploy the Flight but do NOT execute it as part of ./deploy.sh. Default is true, which is right for agent-commerce-monthly-rollup because a Dive published later in the same run reads the database it writes. This Flight has no such dependant, and it calls the Google Drive API, so running it on every deploy would couple CI to an external service for no benefit. It still runs on its schedule and on demand.",
-        "config.DISCOVER_ONLY": "false = load for real. true = walk Drive, resolve every table name, print the plan, then return BEFORE opening the MotherDuck connection — no database, no tables, no audit rows, and no MotherDuck compute at all. Flip it to true to review what a new folder resolves to before any table is created."
+        "": "JSON has no comments and jq rejects // — so these notes live here. deploy.sh reads named keys only, so _doc is inert.",
+        "run_on_deploy": "false = deploy the Flight, don't execute it during ./deploy.sh. Default true. False here so CI never calls the Google Drive API; the schedule and on-demand runs are unaffected.",
+        "DISCOVER_ONLY": "false = load for real. true = print the resolved table plan and return before connecting — writes nothing, uses no MotherDuck compute. Set true to review a new folder's names before any table exists."
       },
       "config": {
         "ROOT_FOLDER_IDS": "[\"1kxGh4Be7XDaJqLX22IZuV-sezOTQWM-f\"]",
