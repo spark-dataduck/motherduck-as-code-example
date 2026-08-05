@@ -19,11 +19,6 @@
       "schedule_cron": "40 6 * * *",
       "run_on_deploy": false,
       "secrets": ["gsheets"],
-      "_doc": {
-        "": "JSON has no comments and jq rejects // — so these notes live here. deploy.sh reads named keys only, so _doc is inert.",
-        "run_on_deploy": "false = deploy the Flight, don't execute it during ./deploy.sh. Default true. False here so CI never calls the Google Drive API; the schedule and on-demand runs are unaffected.",
-        "DISCOVER_ONLY": "false = load for real. true = print the resolved table plan and return before connecting — writes nothing, uses no MotherDuck compute. Set true to review a new folder's names before any table exists."
-      },
       "config": {
         "ROOT_FOLDER_IDS": "[\"1kxGh4Be7XDaJqLX22IZuV-sezOTQWM-f\"]",
         "TARGET_DATABASE": "google_drive",
