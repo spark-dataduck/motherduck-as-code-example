@@ -16,6 +16,13 @@ Config (surfaced as environment variables by the Flight runtime):
                               MotherDuck compute is used at all.
                       false = load every discovered tab              (default: false)
   FAIL_ON_COLLISION   abort before loading if two items collide     (default: true)
+  SKIP_UNCHANGED      true  = skip every file whose Drive modifiedTime matches
+                              the watermark recorded at its last fully-successful
+                              load (kept in <TARGET_DATABASE>.main.gsheets_sync_state),
+                              unless a target table has gone missing. Flights bill
+                              by the second, so a no-change run finishes in seconds
+                              instead of paying for every re-load.
+                      false = reload every discovered tab            (default: true)
   MAX_ATTEMPTS        per-item total attempts (not "retries")       (default: 5)
   RETRY_BASE_SECONDS  exponential-backoff multiplier                (default: 2)
 
@@ -48,6 +55,7 @@ class PlannedItem:
     source_ref: str
     file_id: str
     tab: str
+    modified_time: str = ""
 
 
 def slugify(name: str) -> str:
@@ -103,6 +111,60 @@ def detect_collisions(
     for item in items:
         seen.setdefault((item.schema, item.table), []).append(item.source_ref)
     return {key: refs for key, refs in seen.items() if len(refs) > 1}
+
+
+# --- change detection ---------------------------------------------------
+
+def plan_loads(
+    planned: list[PlannedItem],
+    synced: dict[str, str],
+    existing_tables: set[tuple[str, str]],
+    skip_unchanged: bool,
+) -> tuple[list[PlannedItem], list[PlannedItem]]:
+    """Partition planned items into (to_load, skipped).
+
+    A tab is skipped only when every reason to load it is absent: skipping is
+    enabled, Drive reported a modifiedTime, that time equals the watermark
+    recorded at the file's last fully-successful sync, and the target table
+    still exists — dropping a table in MotherDuck must not require touching
+    the sheet to get it back. An empty modifiedTime always loads: the failure
+    mode of change detection must be a redundant reload, never a missed
+    update.
+    """
+    to_load: list[PlannedItem] = []
+    skipped: list[PlannedItem] = []
+    for item in planned:
+        unchanged = (
+            skip_unchanged
+            and item.modified_time != ""
+            and synced.get(item.file_id) == item.modified_time
+            and (item.schema, item.table) in existing_tables
+        )
+        (skipped if unchanged else to_load).append(item)
+    return to_load, skipped
+
+
+def watermark_updates(
+    results: list[tuple[PlannedItem, bool]],
+) -> tuple[dict[str, str], set[str]]:
+    """Turn per-tab load results into per-file watermark writes.
+
+    Returns (upserts, deletes). upserts maps file_id -> modified_time for
+    files whose loaded tabs all succeeded. deletes holds files where any tab
+    failed: their watermark must go, so the next run retries the whole file
+    rather than trusting a half-loaded one.
+    """
+    succeeded: dict[str, str] = {}
+    failed: set[str] = set()
+    for item, ok in results:
+        if ok:
+            succeeded.setdefault(item.file_id, item.modified_time)
+        else:
+            failed.add(item.file_id)
+    return (
+        {fid: mtime for fid, mtime in succeeded.items() if fid not in failed},
+        failed,
+    )
 
 
 # --- discovery --------------------------------------------------------------
@@ -178,6 +240,7 @@ def discover(
                         source_ref=f"{path}/{name}[{tab}]",
                         file_id=cid,
                         tab=tab,
+                        modified_time=child.get("modifiedTime", ""),
                     )
                 )
 
@@ -205,7 +268,7 @@ def drive_lister(service):
                 service.files()
                 .list(
                     q=f"'{folder_id}' in parents and trashed = false",
-                    fields="nextPageToken, files(id, name, mimeType)",
+                    fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
                     pageSize=1000,
                     pageToken=page_token,
                     supportsAllDrives=True,
@@ -362,7 +425,8 @@ def _warn_orphans(con, target_db: str, planned: list[PlannedItem]) -> None:
     existing = con.execute(
         "SELECT table_schema, table_name FROM information_schema.tables "
         "WHERE table_catalog = ? AND table_type = 'BASE TABLE' "
-        "AND NOT (table_schema = 'main' AND table_name = 'gsheets_sync_log')",
+        "AND NOT (table_schema = 'main' "
+        "AND table_name IN ('gsheets_sync_log', 'gsheets_sync_state'))",
         [target_db],
     ).fetchall()
     expected = {(item.schema, item.table) for item in planned}
@@ -396,6 +460,7 @@ def main() -> None:
     all_varchar = _env_bool("ALL_VARCHAR", True)
     discover_only = _env_bool("DISCOVER_ONLY", False)
     fail_on_collision = _env_bool("FAIL_ON_COLLISION", True)
+    skip_unchanged = _env_bool("SKIP_UNCHANGED", True)
     max_attempts = _env_int("MAX_ATTEMPTS", 5)
     retry_base = _env_float("RETRY_BASE_SECONDS", 2)
 
@@ -465,6 +530,59 @@ def main() -> None:
 
     con = duckdb.connect("md:")
     try:
+        con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(target_db)}")
+        log_table = f"{quote_ident(target_db)}.main.gsheets_sync_log"
+        con.execute(
+            f"CREATE TABLE IF NOT EXISTS {log_table} ("
+            "run_id VARCHAR, source_ref VARCHAR, target_ref VARCHAR, rows BIGINT, "
+            "attempts INTEGER, status VARCHAR, error VARCHAR, "
+            "started_at TIMESTAMP WITH TIME ZONE, finished_at TIMESTAMP WITH TIME ZONE)"
+        )
+        state_table = f"{quote_ident(target_db)}.main.gsheets_sync_state"
+        con.execute(
+            f"CREATE TABLE IF NOT EXISTS {state_table} ("
+            "file_id VARCHAR, source_file VARCHAR, modified_time VARCHAR, "
+            "synced_at TIMESTAMP WITH TIME ZONE)"
+        )
+
+        synced = dict(
+            con.execute(
+                f"SELECT file_id, modified_time FROM {state_table}"
+            ).fetchall()
+        )
+        existing_tables = set(
+            con.execute(
+                "SELECT table_schema, table_name FROM information_schema.tables "
+                "WHERE table_catalog = ? AND table_type = 'BASE TABLE'",
+                [target_db],
+            ).fetchall()
+        )
+        to_load, skipped = plan_loads(
+            planned, synced, existing_tables, skip_unchanged
+        )
+        if skipped:
+            print(
+                f"Unchanged since last sync: "
+                f"{len({item.file_id for item in skipped})} file(s), "
+                f"{len(skipped)} tab(s) skipped"
+            )
+
+        # A file that vanished from Drive keeps its tables (_warn_orphans
+        # covers those) but loses its watermark row: state is bookkeeping,
+        # not customer data, and a stale row would mask a later re-share.
+        for fid in sorted(set(synced) - {item.file_id for item in planned}):
+            con.execute(f"DELETE FROM {state_table} WHERE file_id = ?", [fid])
+
+        if not to_load:
+            _warn_orphans(con, target_db, planned)
+            print(
+                f"Done: nothing changed; {len(skipped)} item(s) skipped, "
+                "nothing loaded"
+            )
+            return
+
+        # Deferred until something actually loads: a no-change run never
+        # installs the extension or ships the key through the query path.
         con.execute("INSTALL gsheets FROM community")
         con.execute("LOAD gsheets")
         # CREATE SECRET has no parameter-binding form, so the private key
@@ -475,23 +593,16 @@ def main() -> None:
             f"(TYPE gsheet, PROVIDER key_file, EMAIL {sql_str(key['client_email'])}, "
             f"SECRET {sql_str(key['private_key'])})"
         )
-        con.execute(f"CREATE DATABASE IF NOT EXISTS {quote_ident(target_db)}")
-        log_table = f"{quote_ident(target_db)}.main.gsheets_sync_log"
-        con.execute(
-            f"CREATE TABLE IF NOT EXISTS {log_table} ("
-            "run_id VARCHAR, source_ref VARCHAR, target_ref VARCHAR, rows BIGINT, "
-            "attempts INTEGER, status VARCHAR, error VARCHAR, "
-            "started_at TIMESTAMP WITH TIME ZONE, finished_at TIMESTAMP WITH TIME ZONE)"
-        )
 
         run_id = str(uuid.uuid4())
-        for schema in sorted({item.schema for item in planned}):
+        for schema in sorted({item.schema for item in to_load}):
             con.execute(
                 f"CREATE SCHEMA IF NOT EXISTS {quote_ident(target_db)}.{quote_ident(schema)}"
             )
 
         failures = 0
-        for item in planned:
+        results: list[tuple[PlannedItem, bool]] = []
+        for item in to_load:
             # target_ref is the unquoted, human/audit-log form so it stays
             # joinable to a plain information_schema listing; target_sql is
             # the quoted form used in every DDL/DML statement below.
@@ -528,6 +639,7 @@ def main() -> None:
                 rows, status, error = None, "failed", str(exc)[:2000]
                 failures += 1
                 print(f"FAIL {item.source_ref}: {error}")
+            results.append((item, status == "ok"))
 
             con.execute(
                 f"INSERT INTO {log_table} ({', '.join(SYNC_LOG_COLUMNS)}) "
@@ -538,9 +650,24 @@ def main() -> None:
                 ],
             )
 
+        upserts, deletes = watermark_updates(results)
+        source_files = {
+            item.file_id: item.source_ref.rsplit("[", 1)[0] for item in to_load
+        }
+        for fid in sorted(set(upserts) | deletes):
+            con.execute(f"DELETE FROM {state_table} WHERE file_id = ?", [fid])
+        for fid, mtime in sorted(upserts.items()):
+            con.execute(
+                f"INSERT INTO {state_table} VALUES (?, ?, ?, ?)",
+                [fid, source_files[fid], mtime, datetime.now(timezone.utc)],
+            )
+
         _warn_orphans(con, target_db, planned)
 
-        print(f"Done: {len(planned) - failures} item(s) succeeded, {failures} failed")
+        print(
+            f"Done: {len(to_load) - failures} item(s) succeeded, "
+            f"{failures} failed, {len(skipped)} skipped as unchanged"
+        )
         if failures:
             raise SystemExit(1)
     finally:

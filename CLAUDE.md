@@ -17,7 +17,8 @@ The monitoring dives read **only surfaces a customer can reach** — `MD_INFORMA
 ## Commands
 
 Unit tests cover the pure helpers in `flights/gdrive-sheets-sync/flight.py`
-(naming, slugification, SQL quoting). CI runs them before deploying.
+(naming, slugification, SQL quoting, change detection). CI runs them before
+deploying.
 
 ```bash
 pip install pytest==8.3.3
@@ -128,6 +129,13 @@ This applies to reads too — resolve an ID into a variable before `MD_GET_DIVE`
   depends on the database it creates. Set it `false` when a Flight calls an
   external API whose credentials CI may not have — a failed run would otherwise
   fail the whole deploy.
+- **Flights bill by the second — exit early when the source is unchanged.**
+  `gdrive-sheets-sync` keeps a per-file Drive `modifiedTime` watermark in
+  `google_drive.main.gsheets_sync_state` (`SKIP_UNCHANGED`, default true). A
+  file reloads only when its `modifiedTime` moved, a target table went
+  missing, or a tab failed last run; the watermark advances only when every
+  tab of the file loaded. Failure mode is a redundant reload, never a missed
+  update.
 - **`schedule_cron` and `secrets` are declared, not reconciled.** `MD_UPDATE_FLIGHT`
   is a PATCH — omitting an argument leaves the stored value untouched. So a
   schedule added by hand in the UI, or a `schedule_cron` removed from a manifest

@@ -38,6 +38,16 @@ without loading the rest of the catalog.
   depends on the database it creates. Set it `false` when a Flight calls an
   external API whose credentials CI may not have — a failed run would
   otherwise fail the whole deploy.
+- **Exit early when the source has not changed.** Flights bill by the second
+  of runner time, plus Duckling compute while loading, so a scheduled sync
+  should detect "nothing to do" and return in seconds rather than reload
+  data it already has. `gdrive-sheets-sync` does this with Drive's
+  `modifiedTime`: the folder walk it already performs returns the field for
+  free, a per-file watermark lives in `google_drive.main.gsheets_sync_state`,
+  and a file reloads only when its `modifiedTime` moved, a target table went
+  missing, or a tab failed last run. Design the detection so its failure mode
+  is a redundant reload, never a missed update — and only advance a file's
+  watermark when every one of its tabs loaded.
 - **`schedule_cron` and `secrets` are declared, not reconciled.**
   `MD_UPDATE_FLIGHT` is a PATCH — omitting an argument leaves the stored value
   untouched. So a schedule added by hand in the UI, or a `schedule_cron`

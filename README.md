@@ -95,7 +95,7 @@ Not every Flight wants that. `run_on_deploy` decides per Flight whether the depl
 The two Flights do unrelated jobs, and every difference between them lives in their manifest entries rather than in `deploy.sh`:
 
 - **`agent-commerce-monthly-rollup`** reads the `agent_commerce` share and rebuilds `agent_commerce_marts.monthly_spend`, weekly.
-- **`gdrive-sheets-sync`** walks Google Drive folder trees, expands every tab of every Google Sheet it finds, and loads each one into `google_drive`, daily.
+- **`gdrive-sheets-sync`** walks Google Drive folder trees, expands every tab of every Google Sheet it finds, and loads each one into `google_drive`, daily — skipping any file whose Drive `modifiedTime` has not moved since its last fully-successful load.
 
 **`config` becomes environment variables.** Each key in the manifest's `config` map is passed through as `MAP { 'KEY': 'VALUE' }` and surfaced to `flight.py` under the same name, so keys are UPPERCASE by convention. Values are always strings — a list travels as a JSON-encoded string the Flight parses (`ROOT_FOLDER_IDS`, `EXCLUDE_PATTERNS`). Nothing sensitive belongs here; `config` is committed.
 
@@ -119,7 +119,9 @@ Updating flight 'gdrive-sheets-sync' (a2f1c0d4-…)...
 
 It calls the Google Drive API, and a run that fails for credentials CI may not hold would fail the *entire* deploy — including the Dives and Guides that have nothing to do with it. Its own `DISCOVER_ONLY=true` config covers the safe-check case instead: walk Drive, resolve and print every target table name, then return before connecting to MotherDuck at all.
 
-**A Flight is one file, so the tests reach into it.** `MD_CREATE_FLIGHT.source_code` takes a single-file program capped at 200 KB — there are no helper modules to import. The pure logic (slugification, table naming, config parsing, SQL quoting) lives in `flight.py`, and `tests/` loads it by path with `importlib`:
+**`SKIP_UNCHANGED` makes the scheduled run pay only for change.** Flights bill by the second of runner time plus Duckling compute while loading, so a daily sync of sheets that rarely change would mostly pay for re-loading data it already has. Drive returns each file's `modifiedTime` in the same `files.list` responses the folder walk already makes, and the Flight records it per file in `google_drive.main.gsheets_sync_state` after a fully-successful load. The next run reloads a file only when its `modifiedTime` moved, a target table went missing (dropping a table in MotherDuck must not require editing the sheet to get it back), or any of its tabs failed last time — a failed tab deletes the file's watermark so the whole file retries. A run where nothing changed reads one small state table and exits in seconds, before the gsheets extension or the Drive credentials ever reach the query path. Set `SKIP_UNCHANGED=false` to force a full reload; the failure mode of the detection is always a redundant reload, never a missed update, because an unknown `modifiedTime` loads unconditionally.
+
+**A Flight is one file, so the tests reach into it.** `MD_CREATE_FLIGHT.source_code` takes a single-file program capped at 200 KB — there are no helper modules to import. The pure logic (slugification, table naming, config parsing, SQL quoting, change detection) lives in `flight.py`, and `tests/` loads it by path with `importlib`:
 
 ```bash
 pip install pytest==8.3.3

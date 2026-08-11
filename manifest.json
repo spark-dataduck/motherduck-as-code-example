@@ -26,6 +26,7 @@
         "EXCLUDE_PATTERNS": "[]",
         "ALL_VARCHAR": "true",
         "DISCOVER_ONLY": "false",
+        "SKIP_UNCHANGED": "true",
         "FAIL_ON_COLLISION": "true",
         "MAX_ATTEMPTS": "5",
         "RETRY_BASE_SECONDS": "2"
