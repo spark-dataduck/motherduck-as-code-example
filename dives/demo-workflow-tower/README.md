@@ -192,6 +192,46 @@ pipeline's trigger chain so the board refreshes right after each build. Its shap
    upstream did not change" signal.
 5. **Objects.** Apply the status rules to every node and write all six tables, `collect_log` last.
 
+### Schedule and configuration
+
+Everything about *when* and *as whom* the collector runs lives on the Flight, not in its code. The
+reference is declared like this (names are placeholders):
+
+```json
+{
+  "name": "tower-collect",
+  "source": "flights/tower-collect/flight.py",
+  "requirements": "flights/tower-collect/requirements.txt",
+  "schedule_cron": "0 1 * * *",
+  "access_token_name": "<pipeline-service-account-token>",
+  "config": {
+    "TARGET_DATABASE": "<database that holds ops>",
+    "BUCKET_PREFIX": "s3://<bucket>/<prefix>",
+    "SHARE_NAME": "<share the Dive attaches>"
+  }
+}
+```
+
+- **Schedule.** `schedule_cron` on the Flight is the safety-net cadence; `MD_CREATE_FLIGHT` /
+  `MD_UPDATE_FLIGHT` set it. Size it against the fastest pipeline Flight you want to see go stale:
+  the status rule marks a Flight `warn` at twice its own cron period, and the board's ages are only
+  as fresh as the last collection, so a collector that runs daily cannot show an hourly Flight
+  turning stale until the next morning.
+- **Trigger.** The build Flight's last step looks the collector up by name and runs it, in two
+  statements because the `MD_*` table functions take literals only (a subquery as the argument is
+  rejected): `SELECT flight_id FROM MD_LIST_FLIGHTS("LIMIT" := 10000) WHERE flight_name = '…'`,
+  then `FROM MD_RUN_FLIGHT(flight_id := '<that id>')`. The name comes from the build Flight's own
+  config (`TOWER_FLIGHT_NAME`), so the chain is wired in the manifest, not hardcoded. A triggered
+  run shows as `on trigger` in `ops.runs` (`is_scheduled = false`).
+- **Identity.** `access_token_name` must be a token of the service account that owns the pipeline
+  Flights; that is what makes `MD_LIST_FLIGHTS` return them. A personal token would collect an
+  empty board.
+- **Config.** The collector reads its environment: the database to write `ops` into, the S3 prefix
+  to measure, and the share name to keep updated. Add whatever your own collector needs (a dbt
+  `target/` path, a client slug for `app`) the same way, so one `flight.py` serves every deployment.
+- **Dependencies.** `requirements.txt` pins `duckdb` to the version MotherDuck supports plus
+  `pytz` for the `TIMESTAMPTZ` columns `MD_LIST_FLIGHT_RUNS` returns.
+
 Notes from building the reference: in the Flight runtime DuckDB reports `TimeZone = 'Etc/Unknown'`,
 which breaks the Python client decoding `TIMESTAMPTZ` from `MD_LIST_FLIGHT_RUNS()`, so run
 `SET TimeZone = 'UTC'` first and ship `pytz`. Bulk-insert through `read_json` with an explicit
