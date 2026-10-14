@@ -1,6 +1,6 @@
 # MotherDuck as Code — a worked example
 
-Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. Two **Flights**, five **Dives**, six **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
+Managing MotherDuck resources the way you manage application code: declared in a repository, reviewed in a pull request, deployed by CI. Two **Flights**, six **Dives**, six **Guides**, and a **share** — all reconciled by one bash script that calls the `MD_*` SQL functions directly.
 
 The artifacts are just a vehicle. **What this repository is actually showing you is the mechanics**: how a deploy decides between creating and updating, how file contents get into a table function, why order matters, and which parts drift if you don't reconcile them.
 
@@ -10,7 +10,7 @@ The artifacts are just a vehicle. **What this repository is actually showing you
 | --- | --- |
 | Database + share | `agent_commerce` |
 | Flights | `agent-commerce-monthly-rollup` · `gdrive-sheets-sync` |
-| Dives | `Agent Commerce Overview` · `Overall Usage Monitoring` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` |
+| Dives | `Agent Commerce Overview` · `Overall Usage Monitoring` · `Dive Usage Monitoring` · `MCP Usage Monitoring` · `Flight Usage Monitoring` · `Workflow Tower` |
 | Guides | `MotherDuck as Code — orientation` · `Agent commerce metrics` · `Revenue run-rate and trend` · `Usage monitoring with QUERY_HISTORY` · `Dive conventions` · `Flight conventions` |
 
 ---
@@ -191,6 +191,7 @@ Each monitoring dive ships a `queries.sql` beside it with the exact queries it r
 | [`dives/dive-usage-monitoring/queries.sql`](dives/dive-usage-monitoring/queries.sql) | Which Dives drive compute, on whose ducklings, from which surface |
 | [`dives/mcp-usage-monitoring/queries.sql`](dives/mcp-usage-monitoring/queries.sql) | Which MCP clients and users are querying, and how much |
 | [`dives/flight-usage-monitoring/queries.sql`](dives/flight-usage-monitoring/queries.sql) | Flight inventory and run health, plus a query that *generates* the fan-out query |
+| [`dives/demo-workflow-tower/queries.sql`](dives/demo-workflow-tower/queries.sql) | A pipeline's own telemetry — node status, lineage edges, Flight runs, per-table loads, freshness — read back from the `ops` schema a collector Flight writes; see its [README](dives/demo-workflow-tower/README.md) |
 
 These read only customer-accessible surfaces — `MD_INFORMATION_SCHEMA.QUERY_HISTORY` and the `MD_LIST_*` functions — so they run in your own account unchanged. The first three need org admin on a Business plan; the Flight one is scoped to the calling identity.
 

@@ -18,7 +18,9 @@
       "requirements": "flights/gdrive-sheets-sync/requirements.txt",
       "schedule_cron": "40 6 * * *",
       "run_on_deploy": false,
-      "secrets": ["gsheets"],
+      "secrets": [
+        "gsheets"
+      ],
       "config": {
         "ROOT_FOLDER_IDS": "[\"1kxGh4Be7XDaJqLX22IZuV-sezOTQWM-f\"]",
         "TARGET_DATABASE": "google_drive",
@@ -77,6 +79,18 @@
       "status": "ready",
       "description": "Flight inventory and run health from MD_LIST_FLIGHTS and MD_LIST_FLIGHT_RUNS, fanning out across flights in the client because SQL cannot.",
       "required_resources": []
+    },
+    {
+      "title": "Workflow Tower",
+      "source": "dives/demo-workflow-tower/dive.tsx",
+      "status": "ready",
+      "description": "A data pipeline watching itself: a swimlane lineage board over the ops telemetry a collector Flight snapshots into a database — status on every source, Flight, table, export, share and consumer, Data-flow and Trigger views, per-node run and load history, freshness. Reads a frozen snapshot of a six-Flight demo pipeline through the org-wide demo_workflow_tower_share.",
+      "required_resources": [
+        {
+          "url": "md:_share/demo_workflow_tower_share/474de109-046b-45d1-ad82-bf66ca5ee459",
+          "alias": "demo_workflow_tower_share"
+        }
+      ]
     }
   ],
   "guides": [

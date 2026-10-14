@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A worked example of managing MotherDuck resources as code: two Flights, five Dives, six Guides, and a share — all declared in `manifest.json` and reconciled by `deploy.sh`, which calls the `MD_*` SQL functions through the DuckDB CLI. There is no framework, no state file, and no committed resource IDs.
+A worked example of managing MotherDuck resources as code: two Flights, six Dives, six Guides, and a share — all declared in `manifest.json` and reconciled by `deploy.sh`, which calls the `MD_*` SQL functions through the DuckDB CLI. There is no framework, no state file, and no committed resource IDs.
 
 The artifacts are a vehicle; the repository's real subject is the deploy mechanics. Prose in `README.md` and the guides is part of the deliverable — keep it accurate when you change behavior.
 
