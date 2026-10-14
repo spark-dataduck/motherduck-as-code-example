@@ -79,9 +79,16 @@ if __name__ == "__main__":
 
 ## Operating them
 
-Run status values carry a `RUN_STATUS_` prefix. Comparing against a bare
-`SUCCEEDED` is valid code that never matches, so a wait loop written that way
-hangs until it times out and then reports failure on a run that succeeded.
+Run status values come in two forms. `MD_LIST_FLIGHT_RUNS` returned
+`RUN_STATUS_SUCCEEDED` / `RUN_STATUS_FAILED` / `RUN_STATUS_RUNNING` until
+September 2026 and returns bare `SUCCEEDED` / `FAILED` / `RUNNING` today, while
+the MotherDuck docs still show the prefixed form. A comparison written against
+only one form is valid code that silently never matches, so a wait loop written
+that way hangs until it times out and then reports failure on a run that
+succeeded. Strip an optional prefix once and compare against the bare form:
+`regexp_replace(status, '^RUN_STATUS_', '')` in SQL, or
+`s.replace(/^RUN_STATUS_/, "")` in JS. See `dives/flight-usage-monitoring/queries.sql`
+(query 3) and `dives/demo-workflow-tower/dive.tsx` (`runStatus`) for examples.
 
 ```sql
 -- Inventory
