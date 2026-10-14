@@ -14,9 +14,15 @@
 //      read MD_LIST_FLIGHTS(), then build a UNION ALL BY NAME over
 //      MD_LIST_FLIGHT_RUNS in JavaScript, one branch per flight id.
 //
-// Scope: Flight SQL functions are scoped to the calling identity. You see the
-// Flights YOUR user or service account owns — an org admin does not
-// automatically see everyone's.
+// Scope: Flight SQL functions are scoped to the calling identity. A user or
+// service account sees the Flights it owns; an org admin sees every Flight in
+// the organization (and their runs). Pass owner_only := true to
+// MD_LIST_FLIGHTS() to narrow an admin back to their own Flights.
+//
+// Run statuses: MD_LIST_FLIGHT_RUNS returned RUN_STATUS_SUCCEEDED and friends
+// until September 2026 and returns bare SUCCEEDED / FAILED / RUNNING today,
+// while the docs still show the prefixed form. The run-health query strips an
+// optional RUN_STATUS_ prefix once, so every status check below accepts both.
 //
 // The same SQL, ready to paste into a notebook, is in queries.sql.
 
@@ -150,20 +156,24 @@ export default function FlightUsageMonitoring() {
   // 2. Run health. SQL cannot loop over the ids, so assemble the UNION here.
   const runsSQL = ids.length
     ? `
-    WITH all_runs AS (
+    WITH raw_runs AS (
       ${ids.map((id) => `FROM MD_LIST_FLIGHT_RUNS(flight_id := '${id}')`).join("\n      UNION ALL BY NAME\n      ")}
+    ),
+    all_runs AS (
+      SELECT * REPLACE (regexp_replace(status, '^RUN_STATUS_', '') AS status)
+      FROM raw_runs
     )
     SELECT flight_name,
            count(*)                                                     AS total_runs,
-           count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED')             AS succeeded,
-           count(*) FILTER (status = 'RUN_STATUS_FAILED'
+           count(*) FILTER (status = 'SUCCEEDED')                       AS succeeded,
+           count(*) FILTER (status = 'FAILED'
                             AND created_at >= now() - INTERVAL ${w} DAY) AS recent_failures,
-           round(100.0 * count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED') / count(*), 1) AS success_pct,
-           round(avg(epoch(ended_at - started_at)) FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1) AS avg_secs,
-           round(sum(epoch(ended_at - started_at)) FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1) AS total_secs,
+           round(100.0 * count(*) FILTER (status = 'SUCCEEDED') / count(*), 1) AS success_pct,
+           round(avg(epoch(ended_at - started_at)) FILTER (status = 'SUCCEEDED'), 1) AS avg_secs,
+           round(sum(epoch(ended_at - started_at)) FILTER (status = 'SUCCEEDED'), 1) AS total_secs,
            strftime(max(created_at), '%Y-%m-%d %H:%M')                   AS last_run,
-           strftime(max(created_at) FILTER (status = 'RUN_STATUS_SUCCEEDED'), '%Y-%m-%d %H:%M') AS last_success,
-           strftime(max(created_at) FILTER (status = 'RUN_STATUS_FAILED'), '%Y-%m-%d %H:%M')    AS last_failure
+           strftime(max(created_at) FILTER (status = 'SUCCEEDED'), '%Y-%m-%d %H:%M') AS last_success,
+           strftime(max(created_at) FILTER (status = 'FAILED'), '%Y-%m-%d %H:%M')    AS last_failure
     FROM all_runs
     GROUP BY flight_name
     ORDER BY last_run DESC`

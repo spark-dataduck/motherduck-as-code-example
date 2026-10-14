@@ -5,9 +5,10 @@
 --
 -- Two things to know before you start:
 --
---   1. Flight SQL functions are scoped to the CALLING IDENTITY. You see the
---      Flights your own user or service account owns — an org admin does not
---      automatically see everyone's.
+--   1. Flight SQL functions are scoped to the CALLING IDENTITY. A user or
+--      service account sees the Flights it owns; an org admin sees every
+--      Flight in the organization (and their runs). Pass owner_only := true
+--      to MD_LIST_FLIGHTS() to narrow an admin back to their own Flights.
 --
 --   2. There is no per-Flight compute attribution. Flight connections appear in
 --      QUERY_HISTORY as `duckdb/… python/… md-flights` with NO flight id, so
@@ -30,19 +31,23 @@ ORDER BY flight_name;
 --     -> Binder Error: ... only supports literals as parameters.
 -- So SQL cannot fan out across Flights on its own. Run this to BUILD the query,
 -- then copy the single value it returns into a new cell and run that.
-SELECT 'WITH all_runs AS (' || chr(10) || '  ' ||
+SELECT 'WITH raw_runs AS (' || chr(10) || '  ' ||
        string_agg('FROM MD_LIST_FLIGHT_RUNS(flight_id := ''' || flight_id || ''')',
                   chr(10) || '  UNION ALL BY NAME' || chr(10) || '  '
                   ORDER BY flight_name) || chr(10) ||
+       '),' || chr(10) ||
+       'all_runs AS (' || chr(10) ||
+       '  SELECT * REPLACE (regexp_replace(status, ''^RUN_STATUS_'', '''') AS status)' || chr(10) ||
+       '  FROM raw_runs' || chr(10) ||
        ')' || chr(10) ||
        'SELECT flight_name,' || chr(10) ||
        '       count(*)                                                  AS total_runs,' || chr(10) ||
-       '       count(*) FILTER (status = ''RUN_STATUS_FAILED''' || chr(10) ||
+       '       count(*) FILTER (status = ''FAILED''' || chr(10) ||
        '                        AND created_at >= now() - INTERVAL 7 DAY) AS failures_7d,' || chr(10) ||
-       '       count(*) FILTER (status = ''RUN_STATUS_SUCCEEDED'')        AS succeeded,' || chr(10) ||
+       '       count(*) FILTER (status = ''SUCCEEDED'')                   AS succeeded,' || chr(10) ||
        '       max(created_at)                                           AS last_run,' || chr(10) ||
-       '       max(created_at) FILTER (status = ''RUN_STATUS_SUCCEEDED'') AS last_successful_run,' || chr(10) ||
-       '       max(created_at) FILTER (status = ''RUN_STATUS_FAILED'')    AS last_failed_run' || chr(10) ||
+       '       max(created_at) FILTER (status = ''SUCCEEDED'')            AS last_successful_run,' || chr(10) ||
+       '       max(created_at) FILTER (status = ''FAILED'')               AS last_failed_run' || chr(10) ||
        'FROM all_runs' || chr(10) ||
        'GROUP BY flight_name' || chr(10) ||
        'ORDER BY last_run DESC;' AS run_health_sql
@@ -51,21 +56,27 @@ FROM MD_LIST_FLIGHTS();
 
 -- 3. Run health (the shape query 2 produces) ---------------------------------
 -- Paste your own flight ids here, or just run query 2 and use its output.
--- Statuses carry a RUN_STATUS_ prefix: comparing against a bare 'SUCCEEDED'
--- is valid SQL that never matches.
-WITH all_runs AS (
+-- Statuses came back as RUN_STATUS_SUCCEEDED / RUN_STATUS_FAILED until
+-- September 2026 and come back bare (SUCCEEDED / FAILED / RUNNING) today; the
+-- docs still show the prefixed form. all_runs strips an optional prefix once
+-- so the comparisons below match either way.
+WITH raw_runs AS (
   FROM MD_LIST_FLIGHT_RUNS(flight_id := '00000000-0000-0000-0000-000000000000')  -- flight_1
   UNION ALL BY NAME
   FROM MD_LIST_FLIGHT_RUNS(flight_id := '00000000-0000-0000-0000-000000000000')  -- flight_2
+),
+all_runs AS (
+  SELECT * REPLACE (regexp_replace(status, '^RUN_STATUS_', '') AS status)
+  FROM raw_runs
 )
 SELECT flight_name,
        count(*)                                                  AS total_runs,
-       count(*) FILTER (status = 'RUN_STATUS_FAILED'
+       count(*) FILTER (status = 'FAILED'
                         AND created_at >= now() - INTERVAL 7 DAY) AS failures_7d,
-       count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED')          AS succeeded,
+       count(*) FILTER (status = 'SUCCEEDED')                     AS succeeded,
        max(created_at)                                           AS last_run,
-       max(created_at) FILTER (status = 'RUN_STATUS_SUCCEEDED')   AS last_successful_run,
-       max(created_at) FILTER (status = 'RUN_STATUS_FAILED')      AS last_failed_run
+       max(created_at) FILTER (status = 'SUCCEEDED')              AS last_successful_run,
+       max(created_at) FILTER (status = 'FAILED')                 AS last_failed_run
 FROM all_runs
 GROUP BY flight_name
 ORDER BY last_run DESC;
@@ -95,11 +106,11 @@ WHERE user_agent LIKE '%md-flights%'
 -- avg_secs is the early warning: a Flight getting steadily slower is a Flight
 -- heading for a timeout.
 --
---   round(100.0 * count(*) FILTER (status = 'RUN_STATUS_SUCCEEDED') / count(*), 1) AS success_pct,
+--   round(100.0 * count(*) FILTER (status = 'SUCCEEDED') / count(*), 1) AS success_pct,
 --   round(avg(epoch(ended_at - started_at))
---         FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1)                            AS avg_secs,
+--         FILTER (status = 'SUCCEEDED'), 1)                            AS avg_secs,
 --   round(sum(epoch(ended_at - started_at))
---         FILTER (status = 'RUN_STATUS_SUCCEEDED'), 1)                            AS total_secs
+--         FILTER (status = 'SUCCEEDED'), 1)                            AS total_secs
 --
 -- total_secs is the one to watch for cost: a fast Flight that runs constantly
 -- can burn more compute than a slow one that runs nightly.
