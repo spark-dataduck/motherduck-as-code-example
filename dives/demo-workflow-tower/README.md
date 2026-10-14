@@ -162,7 +162,14 @@ Conventions the Dive relies on:
 
 Roll-ups take the worst status present: fail > warn > idle > ok.
 
-## Writing a collector
+## Writing a collector Flight
+
+It is **one Flight, one run, one full rewrite**. There is no Flight per source, table or database:
+a single collector walks the whole pipeline in one process and ends by `CREATE OR REPLACE`-ing all
+six `ops` tables, `collect_log` last. Two reasons. Every status and age on the board then comes from
+one moment, the `collect_log` stamp, so a Flight checked at 01:00 is never shown beside a table
+checked at 03:00. And each Flight run pays a fixed startup cost of roughly 20 seconds before any
+work, so one run a day is cheaper than six.
 
 The reference collector is a Python Flight on a daily cron, also triggered as the last link of the
 pipeline's trigger chain so the board refreshes right after each build. Its shape:
