@@ -152,6 +152,20 @@ Conventions the Dive relies on:
 - `ord` is read in a separate query whose failure is swallowed, so a snapshot without that column
   still draws (lanes fall back to type order, then name).
 
+### What can be a node
+
+Not only MotherDuck resources. A node is anything the collector writes a row for: the demo's
+sources are an external API and a warehouse task, its consumers a warehouse read-back and an MCP
+client. What differs is how a status is earned. Flights, tables and S3 prefixes are **measured**
+(`MD_LIST_*`, row counts and load history, `read_blob`); sources, exports, shares and consumers
+**inherit** from the nearest measured neighbours. That inheritance is the reference collector's
+choice, not a limit: the collector is a Python Flight with outbound network access, so it can call
+a vendor's or scheduler's API and write a real status instead. `flight` just means "a job with
+runs", so dbt invocations or an external scheduler's jobs can fill the Flights lane through
+`ops.runs`, with the lane label and `runStatus()` the only Dive edits. The Dive itself cannot reach
+outside MotherDuck (the runtime blocks `fetch()` beyond `*.motherduck.com`), so every external
+fact arrives through the collector.
+
 ### Status rules the reference collector applied
 
 | Node type | Rule |
