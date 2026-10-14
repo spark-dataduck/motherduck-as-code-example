@@ -97,10 +97,15 @@ const asStatus = (s: string): Status => (s === "ok" || s === "warn" || s === "fa
 const WORST: Status[] = ["fail", "warn", "idle", "ok"];
 const rollupOf = (list: Status[]): Status => WORST.find((s) => list.indexOf(s) >= 0) ?? "idle";
 
-// Run statuses arrive as MotherDuck's RUN_STATUS_* enum strings.
-const runStatus = (s: string): Status =>
-  s === "RUN_STATUS_SUCCEEDED" ? "ok" : s === "RUN_STATUS_FAILED" ? "fail" : s === "RUN_STATUS_RUNNING" ? "warn" : "idle";
-const runLabel = (s: string): string => s.replace(/^RUN_STATUS_/, "").toLowerCase();
+// Run statuses arrived as MotherDuck's RUN_STATUS_* enum strings until
+// September 2026 and come back bare (SUCCEEDED, FAILED, ...) from current
+// MD_LIST_FLIGHT_RUNS; a snapshot can hold either, so strip the prefix first.
+const bareRun = (s: string): string => s.replace(/^RUN_STATUS_/, "");
+const runStatus = (s: string): Status => {
+  const b = bareRun(s);
+  return b === "SUCCEEDED" ? "ok" : b === "FAILED" ? "fail" : b === "RUNNING" ? "warn" : "idle";
+};
+const runLabel = (s: string): string => bareRun(s).toLowerCase();
 
 function fmtNum(n: number): string {
   if (!Number.isFinite(n)) return "–";

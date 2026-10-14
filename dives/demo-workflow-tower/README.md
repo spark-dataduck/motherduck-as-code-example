@@ -31,9 +31,10 @@ rather than the viewer's clock (see *Ages* below).
                        pipeline)               every run)          health itself)
 ```
 
-**Flights and their runs are identity-scoped.** `MD_LIST_FLIGHTS()` returns only the caller's
-own Flights and `MD_LIST_FLIGHT_RUNS()` needs a `flight_id`, so a Dive viewer reading through a
-share can never see a service account's Flights directly. A collector Flight that runs *as* the
+**Flights and their runs are identity-scoped.** `MD_LIST_FLIGHTS()` returns the caller's own
+Flights, or every Flight in the org when the caller is an admin, and `MD_LIST_FLIGHT_RUNS()` needs a
+`flight_id`. So a non-admin Dive viewer reading through a share cannot see a service account's
+Flights, and a board that queried them directly would show a different pipeline to each viewer. A collector Flight that runs *as* the
 pipeline's identity snapshots what it can see into plain tables, and the Dive reads those. All of
 the "is it stale / failing / miswired" computation happens upstream in the collector; the Dive only
 renders what it is told. That also keeps it cheap: six small queries on load, two more when a node
@@ -100,7 +101,7 @@ CREATE OR REPLACE TABLE ops.objects (          -- one row per pipeline node
   schedule_cron   VARCHAR,      -- Flights; NULL means 'on trigger'
   status          VARCHAR,      -- ok | warn | fail | idle | unknown (unknown renders as idle)
   last_run_at     TIMESTAMPTZ,  -- Flights
-  last_run_status VARCHAR,      -- Flights; RUN_STATUS_SUCCEEDED | RUN_STATUS_FAILED | RUN_STATUS_RUNNING | ...
+  last_run_status VARCHAR,      -- Flights; SUCCEEDED | FAILED | RUNNING | CANCELLED | PENDING (prefix stripped)
   last_run_age_s  BIGINT,       -- Flights, at collection time (informational)
   row_count       BIGINT,       -- tables
   fresh_at        TIMESTAMPTZ,  -- tables: last write
@@ -115,7 +116,7 @@ CREATE OR REPLACE TABLE ops.edges (            -- the static graph
 CREATE OR REPLACE TABLE ops.runs (             -- one row per Flight run
   flight_name VARCHAR, flight_id VARCHAR, run_number BIGINT,
   is_scheduled BOOLEAN,                        -- true = cron, false = triggered
-  status      VARCHAR,                         -- RUN_STATUS_* as MD_LIST_FLIGHT_RUNS returns it
+  status      VARCHAR,                         -- as MD_LIST_FLIGHT_RUNS returns it; see 'run statuses' below
   created_at TIMESTAMPTZ, started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ,
   duration_s DOUBLE, exit_code BIGINT
 );
@@ -148,7 +149,11 @@ Conventions the Dive relies on:
 - A table's **band** inside the Tables lane is the schema prefix of its `name`. Tables in a schema
   with no configured band still draw, in an unbanded column after the configured ones.
 - `ops.runs.flight_name` and `ops.table_loads.table_name` must equal the node's `name` exactly.
-- Run statuses map SUCCEEDED → ok, FAILED → fail, RUNNING → warn, anything else → idle.
+- Run statuses: `MD_LIST_FLIGHT_RUNS` returned `RUN_STATUS_SUCCEEDED` and friends until
+  September 2026 and returns the bare `SUCCEEDED` / `FAILED` / `RUNNING` / `CANCELLED` / `PENDING`
+  today, while the docs still show the prefixed form. Strip an optional `RUN_STATUS_` prefix before
+  comparing, in the collector and in the Dive (`runStatus()` does). The Dive maps SUCCEEDED → ok,
+  FAILED → fail, RUNNING → warn, anything else → idle.
 - `ord` is read in a separate query whose failure is swallowed, so a snapshot without that column
   still draws (lanes fall back to type order, then name).
 
@@ -192,7 +197,7 @@ pipeline's trigger chain so the board refreshes right after each build. Its shap
    `ord`) and `EDGES` (`(src, dst, kind)` tuples). The graph's shape does not change at runtime,
    so it lives in the collector, not in a table maintained by hand.
 2. **Flights and runs.** `MD_LIST_FLIGHTS()` and, per Flight, `MD_LIST_FLIGHT_RUNS(flight_id := …)`,
-   run **as the identity that owns the pipeline Flights**. Exclude the collector's own in-progress
+   run **as an org admin or as the identity that owns the pipeline Flights**. Exclude the collector's own in-progress
    run from "latest run" or it always shows as RUNNING. Derive `schedule_cron`, `last_run_*` and
    the Flight status from this.
 3. **Vitals.** `row_count` per table and `fresh_at` = the last write (a load watermark column if
@@ -237,9 +242,10 @@ reference is declared like this (names are placeholders):
   then `FROM MD_RUN_FLIGHT(flight_id := '<that id>')`. The name comes from the build Flight's own
   config (`TOWER_FLIGHT_NAME`), so the chain is wired in the manifest, not hardcoded. A triggered
   run shows as `on trigger` in `ops.runs` (`is_scheduled = false`).
-- **Identity.** `access_token_name` must be a token of the service account that owns the pipeline
-  Flights; that is what makes `MD_LIST_FLIGHTS` return them. A personal token would collect an
-  empty board.
+- **Identity.** `access_token_name` must be a token of an org admin, or of the service account
+  that owns the pipeline Flights; either makes `MD_LIST_FLIGHTS` and `MD_LIST_FLIGHT_RUNS` return
+  them (verified: an admin lists every owner's Flights and reads their runs; `owner_only := true`
+  narrows back). A non-admin token for a different identity would collect an empty board.
 - **Config.** The collector reads its environment: the database to write `ops` into, the S3 prefix
   to measure, and the share name to keep updated. Add whatever your own collector needs (a dbt
   `target/` path, a client slug for `app`) the same way, so one `flight.py` serves every deployment.
@@ -271,7 +277,7 @@ Configuration sits at the top of `dive.tsx`; everything below the layout functio
   `isShotsSel` branch of `DetailPanel`). Delete it for a pipeline without such a table; leaving it
   is harmless, the queries collapse to `SELECT NULL WHERE false` unless that exact node is selected.
 - **Status vocabulary.** `STATUS` (colour, glyph, label per status), `runStatus()` for
-  `RUN_STATUS_*`, `ageLabel()` / `fmtDur()` for formatting.
+  run statuses with or without the `RUN_STATUS_` prefix, `ageLabel()` / `fmtDur()` for formatting.
 - **Theme.** One token object `C` plus two font stacks. The look is deliberately light: paper
   tones, 1.5 px ink borders, hard offset shadows, no radius, sun-yellow actives. Re-theming is a
   token swap, but every lane and band tint is a *fill*, so re-pick those with borders at or above
