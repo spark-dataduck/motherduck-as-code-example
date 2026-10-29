@@ -1,0 +1,41 @@
+{
+  "_comment": "Not wired into the root manifest.json on purpose: these Flights need an SSM bastion in your VPC and two Flight secrets (rds, ssm) that only exist in your org. Paste these two entries into your fork's manifest.json flights[] once those exist. Create the transform first, then put its flight_id into TRIGGER_FLIGHT_ID.",
+  "flights": [
+    {
+      "name": "rds-ssm-dlt-transform",
+      "source": "flights/rds-ssm-dlt-sync/transform/flight.py",
+      "requirements": "flights/rds-ssm-dlt-sync/transform/requirements.txt",
+      "run_on_deploy": false,
+      "config": {
+        "CURATED_SCHEMA": "curated",
+        "TARGET_DB": "",
+        "RAW_SCHEMA": "",
+        "INCREMENTAL_TABLES": ""
+      }
+    },
+    {
+      "name": "rds-ssm-dlt-ingest",
+      "source": "flights/rds-ssm-dlt-sync/ingest/flight.py",
+      "requirements": "flights/rds-ssm-dlt-sync/ingest/requirements.txt",
+      "schedule_cron": "0 */6 * * *",
+      "run_on_deploy": false,
+      "secrets": ["rds", "ssm"],
+      "config": {
+        "AWS_REGION": "us-west-2",
+        "BASTION_INSTANCE_ID": "i-REPLACE_ME",
+        "RDS_HOST": "your-db.xxxxxxxx.us-west-2.rds.amazonaws.com",
+        "RDS_PORT": "5432",
+        "RDS_DATABASE": "your_database",
+        "SOURCE_SCHEMA": "public",
+        "TABLES": "customers,orders",
+        "INCREMENTAL_TABLES": "orders:updated_at:id",
+        "INCREMENTAL_MODE": "append",
+        "TARGET_DB": "rds_sync",
+        "TARGET_SCHEMA": "raw",
+        "TRIGGER_FLIGHT_ID": "<flight_id of rds-ssm-dlt-transform>",
+        "DLT_BACKEND": "sqlalchemy",
+        "SSM_PLUGIN_VERSION": "1.2.896.0"
+      }
+    }
+  ]
+}
