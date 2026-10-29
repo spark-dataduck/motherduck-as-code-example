@@ -107,9 +107,27 @@ psql "postgresql://motherduck_flight@localhost:15432/your_database?sslmode=requi
 (In Postgres a *user* is a role with `LOGIN`; `CREATE USER` and `CREATE ROLE ... LOGIN` are
 the same thing.)
 
-**IAM user.** With the AWS CLI, as someone who can create IAM users. Fill in the region,
-account id, and the bastion instance id (the `--target` in your existing `start-session`
-command):
+**IAM user.** `BASTION_ID` is the bastion's **EC2 instance id** (`i-0123456789abcdef0`), the
+same value you already pass as `--target` in your `aws ssm start-session` command; it is also
+in EC2 → Instances and in Systems Manager → Fleet Manager. The account id is the 12-digit
+number in the console's top-right menu (or `aws sts get-caller-identity`). Either the console
+or the CLI works; the result is identical.
+
+*Console:*
+
+1. IAM → Users → **Create user**. Name `motherduck-flight`. Leave console access unchecked. On
+   the permissions page pick "Attach policies directly" and select nothing. Create user.
+2. Open the user → **Permissions** → Add permissions → **Create inline policy** → JSON tab →
+   paste the policy from [above](#what-you-need-on-the-aws-side) with `<region>`,
+   `<account-id>` and `<bastion-instance-id>` filled in → Next → name `ssm-port-forward` →
+   Create policy. (The Create user wizard can't author an inline policy, so this is a second
+   step; the only way to do it in one pass is to pre-create a managed policy under IAM →
+   Policies and attach that instead.)
+3. **Security credentials** → Access keys → Create access key → "Application running outside
+   AWS" → Create. Copy the access key id and the secret now; the secret is shown once. Delete
+   any downloaded `.csv` once the values are in the MotherDuck secret.
+
+*CLI, as someone who can create IAM users:*
 
 ```bash
 REGION=us-west-2
