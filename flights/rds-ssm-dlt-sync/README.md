@@ -76,7 +76,7 @@ Most teams that already use SSM to reach their database have all of this.
    `aws:SourceIp` condition for the
    [Flight egress IPs](https://motherduck.com/docs/concepts/flights/#connecting-to-external-systems)
    of your MotherDuck region if your security team wants the key pinned to MotherDuck.
-4. **A read-only Postgres role** for the Flight (`SELECT` on the tables to sync).
+4. **A read-only Postgres user** for the Flight (`SELECT` on the tables to sync).
 5. **A cursor column on each incremental table** that the application sets on every write,
    typically `updated_at`. Postgres does not provide one by default; ORMs usually do. A column
    that only exists on insert (`created_at`) never shows updates. Hard deletes are never seen;
@@ -89,7 +89,7 @@ Two `TYPE flights` secrets holding **credentials only** (everything else is Flig
 ```sql
 CREATE SECRET rds IN motherduck (
   TYPE flights,
-  PARAMS MAP {'USER': '<postgres role>', 'PASSWORD': '<password>'}
+  PARAMS MAP {'USER': '<postgres user>', 'PASSWORD': '<password>'}
 );
 CREATE SECRET ssm IN motherduck (
   TYPE flights,
