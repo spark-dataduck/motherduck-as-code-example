@@ -323,12 +323,3 @@ Transform (`config → check → snapshot → merge → verify`):
 | Tunnel throughput | not documented; a few MB/s per session in practice | The real ceiling. Fine for hundreds of MB per run; above a few GB, stage through S3 with a gateway endpoint instead |
 | Flight max runtime | 1 h (Lite/Business), 8 h (Enterprise) | The tunnel lives only as long as the run |
 | Per-run setup | plugin download + StartSession + fresh Postgres connection, ~2 s | Batch cadence, not high frequency |
-
-Good fit: tens of tables, hundreds of MB changed per run, hourly or slower, a database that
-already has SSM in front of it. Not a fit: sub-minute freshness (use a CDC vendor) or tens of
-GB per run (stage through S3).
-
-## Teardown
-
-`MD_DELETE_FLIGHT` both Flights, `DROP DATABASE <TARGET_DB>`, `DROP SECRET rds IN motherduck`,
-`DROP SECRET ssm IN motherduck`, and delete the IAM user (which also invalidates its key).
