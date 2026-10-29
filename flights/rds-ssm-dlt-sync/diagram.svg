@@ -24,7 +24,7 @@
   <g class="md">
     <rect class="box" x="40" y="46" width="200" height="60"/>
     <text x="140" y="70" text-anchor="middle" class="title" fill="#04342c">Ingest Flight</text>
-    <text x="140" y="90" text-anchor="middle" class="sub" fill="#085041">dlt + SSM tunnel, F4</text>
+    <text x="140" y="90" text-anchor="middle" class="sub" fill="#085041">dlt + SSM tunnel, F16</text>
   </g>
   <g class="md">
     <rect class="box" x="300" y="46" width="200" height="60"/>

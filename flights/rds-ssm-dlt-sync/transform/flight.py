@@ -12,7 +12,7 @@
 
 Second Flight in the chain. The first (ingest/flight.py) lands RDS tables in <RAW_SCHEMA> through
 the SSM tunnel and triggers this one with MD_RUN_FLIGHT when its load is done. This one is
-SQL only: every statement runs on a Duckling over `md:`, so the Flight itself can be F4.
+SQL only: every statement runs on a Duckling over `md:`, so the Flight size barely matters; F16 is the default.
 
 Per table:
   * replace tables (full snapshots in raw): CREATE OR REPLACE TABLE curated.<t> AS SELECT the

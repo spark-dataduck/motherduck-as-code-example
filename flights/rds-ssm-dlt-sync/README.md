@@ -106,12 +106,12 @@ manifest format; they are not in the root `manifest.json` because they need your
 secrets.
 
 ```sql
--- 1. transform (SQL only, F4 is enough)
+-- 1. transform (SQL only)
 SELECT flight_id FROM MD_CREATE_FLIGHT(
   name := 'rds-ssm-dlt-transform',
   source_code := $$ ... transform/flight.py ... $$,
   requirements_txt := 'duckdb==1.5.6',
-  instance_type := 'F4',
+  instance_type := 'F16',
   config := MAP {'CURATED_SCHEMA': 'curated', 'TARGET_DB': '', 'RAW_SCHEMA': '', 'INCREMENTAL_TABLES': ''}
 );
 
