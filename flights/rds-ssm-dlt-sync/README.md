@@ -76,11 +76,90 @@ Most teams that already use SSM to reach their database have all of this.
    `aws:SourceIp` condition for the
    [Flight egress IPs](https://motherduck.com/docs/concepts/flights/#connecting-to-external-systems)
    of your MotherDuck region if your security team wants the key pinned to MotherDuck.
-4. **A read-only Postgres user** for the Flight (`SELECT` on the tables to sync).
+4. **A read-only Postgres user** for the Flight (`SELECT` on the tables to sync). See the
+   runbook below for the exact statements.
 5. **A cursor column on each incremental table** that the application sets on every write,
    typically `updated_at`. Postgres does not provide one by default; ORMs usually do. A column
    that only exists on insert (`created_at`) never shows updates. Hard deletes are never seen;
    pair incremental tables with soft deletes or an occasional full refresh.
+
+### Runbook: create the Postgres user and the IAM user
+
+**Postgres user.** Run through your existing SSM tunnel as a superuser or the database owner
+(replace the database, schema, and password):
+
+```sql
+CREATE ROLE motherduck_flight LOGIN PASSWORD '<strong password>';
+GRANT CONNECT ON DATABASE your_database TO motherduck_flight;
+GRANT USAGE ON SCHEMA public TO motherduck_flight;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO motherduck_flight;
+-- tables created later get SELECT too, so a new table never breaks the sync
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO motherduck_flight;
+```
+
+Check it from your laptop before putting it in a secret:
+
+```bash
+psql "postgresql://motherduck_flight@localhost:15432/your_database?sslmode=require" \
+  -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
+```
+
+(In Postgres a *user* is a role with `LOGIN`; `CREATE USER` and `CREATE ROLE ... LOGIN` are
+the same thing.)
+
+**IAM user.** With the AWS CLI, as someone who can create IAM users. Fill in the region,
+account id, and the bastion instance id (the `--target` in your existing `start-session`
+command):
+
+```bash
+REGION=us-west-2
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BASTION_ID=i-REPLACE_ME
+
+cat > motherduck-flight-ssm-policy.json <<EOF2
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StartPortForwardOnly",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ec2:${REGION}:${ACCOUNT_ID}:instance/${BASTION_ID}",
+        "arn:aws:ssm:${REGION}::document/AWS-StartPortForwardingSessionToRemoteHost"
+      ],
+      "Condition": { "BoolIfExists": { "ssm:SessionDocumentAccessCheck": "true" } }
+    },
+    {
+      "Sid": "ManageOwnSessions",
+      "Effect": "Allow",
+      "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
+      "Resource": "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:session/\${aws:username}-*"
+    }
+  ]
+}
+EOF2
+
+aws iam create-user --user-name motherduck-flight
+aws iam put-user-policy --user-name motherduck-flight \
+  --policy-name ssm-port-forward --policy-document file://motherduck-flight-ssm-policy.json
+aws iam create-access-key --user-name motherduck-flight
+```
+
+The last command prints `AccessKeyId` and `SecretAccessKey` once; those two values go into the
+`ssm` secret in MotherDuck and nowhere else. Verify the key can do its one job and nothing more:
+
+```bash
+AWS_ACCESS_KEY_ID=<AccessKeyId> AWS_SECRET_ACCESS_KEY=<SecretAccessKey> \
+aws ssm start-session --region $REGION --target $BASTION_ID \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters host=<RDS endpoint>,portNumber=5432,localPortNumber=15433
+# expected: "Port 15433 opened for sessionId ..."   (Ctrl+C to end)
+
+AWS_ACCESS_KEY_ID=<AccessKeyId> AWS_SECRET_ACCESS_KEY=<SecretAccessKey> \
+aws ec2 describe-instances --region $REGION
+# expected: AccessDenied
+```
 
 ## What you need on the MotherDuck side
 
