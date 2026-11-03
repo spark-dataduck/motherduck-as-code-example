@@ -330,5 +330,5 @@ Transform (`config → check → snapshot → merge → verify`):
 | Session Manager idle timeout | 20 min default (1–60 configurable) | A long gap with no bytes drops the tunnel; normal loads keep it alive |
 | Session Manager max duration | off by default, up to 24 h | If the account sets it, the run must fit inside |
 | Tunnel throughput | not documented; a few MB/s per session in practice | The real ceiling. Fine for hundreds of MB per run; above a few GB, stage through S3 with a gateway endpoint instead |
-| Flight max runtime | 1 h (Lite/Business), 8 h (Enterprise) | The tunnel lives only as long as the run |
+| Flight max runtime | 1 h (Lite), 8 h by default (Business, Enterprise); [plan limits](https://motherduck.com/docs/concepts/flights/#availability-and-plan-limits) | The tunnel lives only as long as the run |
 | Per-run setup | plugin download + StartSession + fresh Postgres connection, ~2 s | Batch cadence, not high frequency |
