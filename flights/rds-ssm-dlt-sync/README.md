@@ -11,7 +11,7 @@ VPC and no IP allowlisting is involved.
 | Flight | What it does | Depends on |
 | --- | --- | --- |
 | [`ingest/flight.py`](ingest/flight.py) | Opens the SSM tunnel, runs a [dlt](https://dlthub.com) `sql_database` pipeline against `127.0.0.1`, lands tables **append-only** in `<TARGET_DB>.<raw>`, closes the tunnel, then triggers the transform with `MD_RUN_FLIGHT`. | boto3, dlt, SQLAlchemy, psycopg2 |
-| [`transform/flight.py`](transform/flight.py) | SQL only. Discovers the tables in the raw schema, rebuilds snapshot tables, `MERGE INTO`s the incremental ones into `<TARGET_DB>.<curated>` (one current row per key), verifies key counts. | duckdb |
+| [`transform/flight.py`](transform/flight.py) | SQL only. Discovers the tables in the raw schema, rebuilds snapshot tables, applies the incremental ones to `<TARGET_DB>.<curated>` with a transactional delete+insert (one current row per key), verifies key counts. | duckdb |
 
 Both Flights print [Flight Explainer](https://motherduck.com/docs/concepts/flights/) markers
 (`# @flight` chart, `@flight-run` / `@flight-log` lines), so each run shows as a live step
@@ -250,7 +250,7 @@ naming every bad value before the tunnel opens):
 | `AWS_REGION`, `BASTION_INSTANCE_ID`, `RDS_HOST`, `RDS_PORT`, `RDS_DATABASE` | | Where to tunnel to. `RDS_HOST` is the **private** endpoint. |
 | `SOURCE_SCHEMA` | `public` | Postgres schema |
 | `TABLES` | | Comma-separated tables to sync (reflected up front, not the whole schema) |
-| `INCREMENTAL_TABLES` | (none) | `table:cursor:key[\|key2],...`. Listed tables are read incrementally (rows at or after the last cursor dlt saw); the rest are full `replace`. The key is what the transform dedupes and merges on. |
+| `INCREMENTAL_TABLES` | (none) | `table:cursor:key[\|key2],...`. Listed tables are read incrementally (rows at or after the last cursor dlt saw); the rest are full `replace`. The key is what the transform dedupes and applies changes on. |
 | `INCREMENTAL_MODE` | `merge` | `append`: append-only raw, history kept, dedupe downstream (recommended). `merge`: dlt upserts in place (delete+insert via a staging dataset); no transform needed, no history. |
 | `TARGET_DB`, `TARGET_SCHEMA` | `rds_sync`, `raw` | Landing database and dlt dataset |
 | `TRIGGER_FLIGHT_ID` | (none) | Transform Flight to start after a clean ingest |
@@ -287,17 +287,26 @@ Transform (`config → check → snapshot → merge → verify`):
 2. Snapshot tables: `CREATE OR REPLACE TABLE curated.t AS SELECT * EXCLUDE (_dlt_id) FROM raw.t`.
 3. Incremental tables: first run builds `curated.t` from a full dedupe of raw. Later runs take
    raw rows with `_dlt_load_id` newer than the max already in curated, dedupe them per key with
-   `max_by(row, (cursor, _dlt_load_id))`, and `MERGE INTO curated.t ... WHEN MATCHED AND
-   (c.cursor IS NULL OR s.cursor >= c.cursor) THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT
-   (...)`. Curated keeps `_dlt_load_id`, so it is its own watermark; there is no state table.
+   `max_by(row, (cursor, _dlt_load_id))`, keep the versions newer than curated's (a NULL cursor in
+   curated counts as oldest), then inside one transaction: `CREATE TEMP TABLE changes AS ...`,
+   `DELETE FROM curated.t USING changes ...`, `INSERT INTO curated.t BY NAME SELECT * FROM changes`,
+   `COMMIT`. Curated keeps `_dlt_load_id`, so it is its own watermark; there is no state table.
 4. Verify: distinct raw keys == curated rows == curated keys, or the run fails.
 
 ## Design notes
 
-- **Append-only raw, then MERGE.** Appends are the cheapest write for the Flight that holds the
+- **Append-only raw, then delete+insert.** Appends are the cheapest write for the Flight that holds the
   fragile part (the tunnel), raw keeps every version the source ever showed, and curated can be
   dropped and rebuilt from raw without touching Postgres. The price is storage that grows
   forever (decide a retention rule) and one more Flight to watch.
+- **Delete+insert in one transaction, not `MERGE INTO`.** DuckDB runs a whole-row `UPDATE` as its
+  slow path (about 3x slower than delete+insert at 5M rows in our measurements), MERGE's bare
+  `INSERT` is positional, and a `WHEN MATCHED AND s.cursor >= c.cursor` guard silently matches
+  nothing on a NULL. MotherDuck supports multi-statement transactions on a single database, so
+  the DELETE and INSERT commit together: a concurrent reader (a Dive refreshing at 7 AM) sees
+  either the old rows or the new rows, never the gap. Verified with a second connection polling
+  curated between the statements (old rows until COMMIT), with an error before COMMIT (rolled
+  back), and with the writer's connection closed mid-transaction (nothing changed).
 - **No primary keys or indexes anywhere.** A PK in MotherDuck builds an ART index that must fit
   in memory on every build; on large tables that is a known OOM source. dlt's `merge` mode
   creates none either.
@@ -307,8 +316,8 @@ Transform (`config → check → snapshot → merge → verify`):
   why the ingest makes it explicitly.
 - **Schema evolution.** New Postgres columns flow into raw as nullable (a
   `table_adapter_callback` relaxes NOT NULL, because DuckDB rejects `ADD COLUMN ... NOT NULL`),
-  and the transform adds them to curated before merging. `INSERT` and `UPDATE SET` use explicit
-  column lists; a bare `INSERT` in `MERGE INTO` is positional and breaks on column order.
+  and the transform adds them to curated before applying changes, then inserts `BY NAME`, so
+  column order never matters. Verified: a column added in raw showed up in curated on the next run.
 - **Switching a table's cursor column** resets dlt's state for it and re-reads the table once
   into raw. The transform's dedupe absorbs it.
 - **In `merge` mode** the ingest passes an empty incremental list, so the transform snapshots
