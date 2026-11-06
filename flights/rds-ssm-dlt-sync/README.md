@@ -11,7 +11,7 @@ VPC and no IP allowlisting is involved.
 | Flight | What it does | Depends on |
 | --- | --- | --- |
 | [`ingest/flight.py`](ingest/flight.py) | Opens the SSM tunnel, runs a [dlt](https://dlthub.com) `sql_database` pipeline against `127.0.0.1`, lands tables **append-only** in `<TARGET_DB>.<raw>`, closes the tunnel, then triggers the transform with `MD_RUN_FLIGHT`. | boto3, dlt, SQLAlchemy, psycopg2 |
-| [`transform/flight.py`](transform/flight.py) | SQL only. Discovers the tables in the raw schema, rebuilds snapshot tables, applies the incremental ones to `<TARGET_DB>.<curated>` with a transactional delete+insert (one current row per key), verifies key counts. | duckdb |
+| [`../pg-dlt-sync/transform/flight.py`](../pg-dlt-sync/transform/flight.py) | SQL only. Discovers the tables in the raw schema, rebuilds snapshot tables, applies the incremental ones to `<TARGET_DB>.<curated>` with a transactional delete+insert (one current row per key), verifies key counts. | duckdb |
 
 Both Flights print [Flight Explainer](https://motherduck.com/docs/concepts/flights/) markers
 (`# @flight` chart, `@flight-run` / `@flight-log` lines), so each run shows as a live step
@@ -206,7 +206,7 @@ secrets.
 -- 1. transform (SQL only)
 SELECT flight_id FROM MD_CREATE_FLIGHT(
   name := 'rds-ssm-dlt-transform',
-  source_code := $$ ... transform/flight.py ... $$,
+  source_code := $$ ... ../pg-dlt-sync/transform/flight.py ... $$,
   requirements_txt := 'duckdb==1.5.6',
   instance_type := 'F16',
   config := MAP {'CURATED_SCHEMA': 'curated', 'TARGET_DB': '', 'RAW_SCHEMA': '', 'INCREMENTAL_TABLES': ''}

@@ -95,11 +95,11 @@ INCREMENTAL_TABLES = os.environ.get("INCREMENTAL_TABLES", "")
 #            current rows only. No PK constraint or index is created in MotherDuck.
 #   append - append-only raw landing, history preserved, never a MERGE here. Updates
 #            arrive as new rows (cursor = updated_at); the transform Flight
-#            (transform/flight.py) dedupes per key into the curated layer.
+#            (../pg-dlt-sync/transform/flight.py) dedupes per key into the curated layer.
 INCREMENTAL_MODE = os.environ.get("INCREMENTAL_MODE", "merge")
 TARGET_DB = os.environ.get("TARGET_DB", "rds_sync")       # MotherDuck database
 TARGET_SCHEMA = os.environ.get("TARGET_SCHEMA", "raw")         # dlt dataset_name (raw landing)
-# Flight to start after a successful load (the curated-layer transform, transform/flight.py).
+# Flight to start after a successful load (the curated-layer transform, ../pg-dlt-sync/transform/flight.py).
 # Empty: skip. The dedupe lives there, not here; this Flight only lands raw.
 TRIGGER_FLIGHT_ID = os.environ.get("TRIGGER_FLIGHT_ID", "")
 DLT_BACKEND = os.environ.get("DLT_BACKEND", "sqlalchemy")         # or "pyarrow"

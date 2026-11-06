@@ -10,9 +10,10 @@
 # @end-flight
 """Build the curated layer from dlt's append-only raw landing, with delete+insert.
 
-Second Flight in the chain. The first (ingest/flight.py) lands RDS tables in <RAW_SCHEMA> through
-the SSM tunnel and triggers this one with MD_RUN_FLIGHT when its load is done. This one is
-SQL only: every statement runs on a Duckling over `md:`, so the Flight size barely matters; F16 is the default.
+Second Flight in the chain. The first (../ingest/flight.py for a Postgres reachable over the
+internet, or ../../rds-ssm-dlt-sync/ingest/flight.py for one behind an SSM bastion) lands the
+Postgres tables in <RAW_SCHEMA> and triggers this one with MD_RUN_FLIGHT when its load is done.
+This one is SQL only: every statement runs on a Duckling over `md:`, so the Flight size barely matters; F16 is the default.
 
 Per table:
   * replace tables (full snapshots in raw): CREATE OR REPLACE TABLE curated.<t> AS SELECT the
@@ -45,7 +46,7 @@ import sys
 
 import duckdb
 
-TARGET_DB = os.environ.get("TARGET_DB") or "rds_sync"
+TARGET_DB = os.environ.get("TARGET_DB") or "pg_sync"
 RAW_SCHEMA = os.environ.get("RAW_SCHEMA") or "raw"
 CURATED_SCHEMA = os.environ.get("CURATED_SCHEMA") or "curated"
 INCREMENTAL_TABLES = os.environ.get("INCREMENTAL_TABLES", "")
