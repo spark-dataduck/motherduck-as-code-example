@@ -168,7 +168,7 @@ naming every bad value before any connection is made):
 | `PG_HOST`, `PG_PORT`, `PG_DATABASE`, `PG_SSLMODE` | , `5432`, `postgres`, `require` | Where to connect, when the secret holds `USER`/`PASSWORD` rather than `DATABASE_URL`. `PG_SSLMODE=disable` only for a local test server. |
 | `SOURCE_SCHEMA` | `public` | Postgres schema |
 | `TABLES` | | Comma-separated tables to sync (reflected up front, not the whole schema) |
-| `INCREMENTAL_TABLES` | (none) | `table:cursor:key[\|key2],...`. Listed tables are read incrementally (rows at or after the last cursor dlt saw); the rest are full `replace`. The key is what the transform dedupes and applies changes on. |
+| `INCREMENTAL_TABLES` | (none) | `table:cursor:key[\|key2][:initial_value],...`. Listed tables are read incrementally (rows at or after the last cursor dlt saw); the rest are full `replace`. The key is what the transform dedupes and applies changes on. The optional fourth field bounds the first run (see [The first run](#the-first-run)). |
 | `INCREMENTAL_MODE` | `append` | `append`: append-only raw, history kept, dedupe downstream. `merge`: dlt upserts in place (delete+insert via a staging dataset); no transform needed, no history. |
 | `TARGET_DB`, `TARGET_SCHEMA` | `pg_sync`, `raw` | Landing database and dlt dataset |
 | `TRIGGER_FLIGHT_ID` | (none) | Transform Flight to start after a clean ingest |
@@ -204,21 +204,59 @@ Transform (`config → check → snapshot → merge → verify`):
    curated counts as oldest), then inside one transaction: `CREATE TEMP TABLE changes AS ...`,
    `DELETE FROM curated.t USING changes ...`, `INSERT INTO curated.t BY NAME SELECT * FROM changes`,
    `COMMIT`. Curated keeps `_dlt_load_id`, so it is its own watermark; there is no state table.
-4. Verify: distinct raw keys == curated rows == curated keys, or the run fails.
+4. Verify: curated has one row per key and every key raw has seen, or the run fails.
 
 ## The first run
 
 With no stored state, dlt reads **every row** of each table once and appends it to raw, then
 saves the max cursor. From the second run on, only rows at or after that value are read. For a
-large table, bound the first run with one of:
-
-- `dlt.sources.incremental(cursor, initial_value=...)` in `build_source()`, if rows older than a
-  date are not needed in raw. Curated then only knows rows updated since that date.
-- A one-time backfill outside the Flight (Postgres → Parquet in S3 → `read_parquet` on a
-  Duckling), then start dlt with `initial_value` at the backfill cut-off.
+large table, that first read has to fit the Flight's temp disk (20 GB on F4, 150 GB on F16,
+300 GB on F32) and the run-time limit. Bound it with the optional fourth field of
+`INCREMENTAL_TABLES`, `table:cursor:key:initial_value`: rows with a cursor below that value are
+never read. On its own that leaves curated knowing only rows updated since then; to keep the
+older rows, seed curated first (next section).
 
 dlt uses `>=` on the cursor and dedupes rows equal to the last value by primary key, so a row
 updated exactly at the watermark is not loaded twice.
+
+### Starting a large table from an existing MotherDuck table
+
+If the table is already in MotherDuck (an earlier per-table sync, a one-off `COPY`, a Parquet
+backfill), start from that copy instead of reading all of Postgres again. The transform treats an
+existing `curated.<table>` as its starting point, so the recipe is: seed curated, bound dlt's first
+read, run.
+
+1. **Pick the cut-off**: a timestamp a little *before* the existing copy's last successful refresh,
+   an hour earlier is plenty. Overlap is harmless (the dedupe keeps the newest cursor per key); a
+   gap is not.
+2. **Seed curated from the existing table**, in the database the ingest will write to:
+
+   ```sql
+   CREATE DATABASE IF NOT EXISTS pg_sync;
+   CREATE SCHEMA IF NOT EXISTS pg_sync.curated;
+   CREATE TABLE pg_sync.curated.survey_responses AS
+     SELECT * FROM old_db.main.survey_responses;
+   ```
+
+   Seed curated, not raw. raw is dlt's append-only landing and carries `_dlt_load_id` and
+   `_dlt_id` per row; the seed needs neither. The transform adds `_dlt_load_id` to curated on its
+   first run and treats the seed rows (NULL load id) as older than anything in raw.
+3. **Put the cut-off in the ingest config**:
+   `INCREMENTAL_TABLES=survey_responses:updated_at:id:2026-11-05T08:00:00Z` (an ISO date or
+   timestamp, or an integer for a numeric cursor).
+4. **Run the ingest once.** dlt reads only `updated_at >= cut-off`, appends those rows to raw,
+   stores the watermark, and triggers the transform. The transform adds any column the seed
+   lacks, then delete+inserts the new versions into the seeded table. Verify passes when curated
+   has one row per key and no raw key is missing from it.
+5. **Compare** `curated.<table>` with the source, then put the Flight on its schedule. The
+   fourth field can stay in the config: once dlt has stored a cursor it is ignored.
+
+Two things to know:
+
+- raw holds history only from the cut-off on. Keep the old copy if earlier versions matter.
+- Column types come from the old copy, not from dlt (`INTEGER` where dlt would create `BIGINT`,
+  for example). The first transform casts raw's values into them on `INSERT` and fails loudly if
+  a cast is impossible; fix the seed with an explicit cast and rerun the transform.
 
 ## Design notes
 

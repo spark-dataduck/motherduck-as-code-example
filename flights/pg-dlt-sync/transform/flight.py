@@ -74,7 +74,9 @@ def q(ident: str) -> str:
 def parse_incremental(raw: str) -> dict[str, tuple[str, list[str]]]:
     out = {}
     for entry in filter(None, (e.strip() for e in raw.split(","))):
-        table, cursor, keys = entry.split(":")
+        table, cursor, keys = entry.split(":", 3)[
+            :3
+        ]  # a 4th field (initial_value) is the ingest's
         out[table] = (cursor, keys.split("|"))
     return out
 
@@ -94,8 +96,8 @@ def validate_config() -> None:
             f"RAW_SCHEMA and CURATED_SCHEMA are both {RAW_SCHEMA!r}; curated would overwrite raw"
         )
     for entry in filter(None, (e.strip() for e in INCREMENTAL_TABLES.split(","))):
-        parts = entry.split(":")
-        if len(parts) != 3 or not all(parts) or not all(parts[2].split("|")):
+        parts = entry.split(":", 3)
+        if len(parts) not in (3, 4) or not all(parts) or not all(parts[2].split("|")):
             problems.append(
                 f"INCREMENTAL_TABLES entry {entry!r}; expected table:cursor_column:key[|key2]"
             )
@@ -299,23 +301,33 @@ def main() -> int:
     for t in merge_tables:
         cursor, keys = incremental[t]
         key_expr = ", ".join(q(k) for k in keys)
-        raw_keys = con.execute(
-            f"SELECT count(DISTINCT ({key_expr})) FROM {db}.{raw}.{q(t)}"
-        ).fetchone()[0]
+        # Curated must hold exactly one row per key and every key raw has ever seen. It may
+        # hold more keys than raw when it was seeded from an existing table (README,
+        # "Starting a large table from an existing MotherDuck table").
+        on = " AND ".join(f"c.{q(k)} = r.{q(k)}" for k in keys)
+        raw_keys, missing = con.execute(
+            f"SELECT count(DISTINCT ({key_expr})), "
+            f"count(DISTINCT ({key_expr})) FILTER (WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {db}.{cur}.{q(t)} AS c WHERE {on})) "
+            f"FROM {db}.{raw}.{q(t)} AS r"
+        ).fetchone()
         cur_rows, cur_keys = con.execute(
             f"SELECT count(*), count(DISTINCT ({key_expr})) FROM {db}.{cur}.{q(t)}"
         ).fetchone()
-        good = raw_keys == cur_keys == cur_rows
+        good = cur_keys == cur_rows and missing == 0
         flog(
             "verify",
-            f"{t}: raw keys={raw_keys} curated rows={cur_rows} curated keys={cur_keys}",
+            f"{t}: raw keys={raw_keys} missing from curated={missing} "
+            f"curated rows={cur_rows} curated keys={cur_keys}",
         )
         if not good:
             ok = False
     fr(
         "verify",
         "ok" if ok else "failed",
-        **({} if ok else {"error": "curated does not match raw keys"}),
+        **(
+            {} if ok else {"error": "curated has duplicate keys or is missing raw keys"}
+        ),
     )
     con.close()
     fr("@flight", "ok" if ok else "failed", exit=0 if ok else 1)

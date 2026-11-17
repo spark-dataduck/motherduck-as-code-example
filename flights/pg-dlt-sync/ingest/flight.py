@@ -82,8 +82,11 @@ TABLES = [
     )
     if t.strip()
 ]
-# "table:cursor_column:key_column[|key2]" entries; those tables are read incrementally (rows
-# at or after the last seen cursor), everything else is a full replace.
+# "table:cursor_column:key_column[|key2][:initial_value]" entries; those tables are read
+# incrementally (rows at or after the last seen cursor), everything else is a full replace.
+# The optional initial_value (ISO date/timestamp, or an integer) bounds the FIRST run: rows
+# with a cursor below it are never read. Once dlt has stored a cursor it takes precedence.
+# See README "Starting a large table from an existing MotherDuck table".
 INCREMENTAL_TABLES = os.environ.get("INCREMENTAL_TABLES", "")
 # How incremental tables land:
 #   merge  - dlt upserts on the key (delete+insert via a staging dataset). Target holds
@@ -125,12 +128,18 @@ def validate_config() -> None:
             "TABLES is empty; expected a comma-separated list of source tables"
         )
     for entry in filter(None, (e.strip() for e in INCREMENTAL_TABLES.split(","))):
-        parts = entry.split(":")
-        if len(parts) != 3 or not all(parts) or not all(parts[2].split("|")):
+        parts = entry.split(":", 3)
+        if len(parts) not in (3, 4) or not all(parts) or not all(parts[2].split("|")):
             problems.append(
-                f"INCREMENTAL_TABLES entry {entry!r}; expected table:cursor_column:key[|key2]"
+                f"INCREMENTAL_TABLES entry {entry!r}; expected "
+                "table:cursor_column:key[|key2][:initial_value]"
             )
             continue
+        if len(parts) == 4 and parse_initial_value(parts[3]) is None:
+            problems.append(
+                f"INCREMENTAL_TABLES entry {entry!r}; initial_value {parts[3]!r} is not an "
+                "ISO date/timestamp or an integer"
+            )
         if parts[0] not in TABLES:
             problems.append(
                 f"INCREMENTAL_TABLES names {parts[0]!r}, which is not in TABLES {TABLES}"
@@ -287,13 +296,38 @@ def wait_for_postgres(pg_url: str, timeout_s: int = PROBE_TIMEOUT_S) -> None:
 # ------------------------------------------------------------------------------ dlt
 
 
-def parse_incremental(raw: str) -> dict[str, tuple[str, list[str]]]:
-    """'orders:updated_at:id,lines:updated_at:order_id|line_no' -> {table: (cursor, [keys])}."""
+def parse_initial_value(raw: str):
+    """'2026-11-05', '2026-11-05T08:00:00Z' or '1200' -> a value dlt can compare with the
+    cursor column (tz-aware datetime, or int). None if it parses as neither. dlt adapts the
+    datetime's tz-awareness to the rows it sees, so this works for timestamp and timestamptz."""
+    import pendulum  # a dlt dependency
+
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    try:
+        value = pendulum.parse(raw)
+    except Exception:
+        return None
+    return value if isinstance(value, pendulum.DateTime) else None
+
+
+def parse_incremental(raw: str) -> dict[str, tuple[str, list[str], object]]:
+    """'orders:updated_at:id,lines:updated_at:order_id|line_no:2026-11-05'
+    -> {table: (cursor, [keys], initial_value or None)}."""
     out = {}
     for entry in filter(None, (e.strip() for e in raw.split(","))):
-        table, cursor, keys = entry.split(":")
-        out[table] = (cursor, keys.split("|"))
+        parts = entry.split(":", 3)
+        table, cursor, keys = parts[:3]
+        initial = parse_initial_value(parts[3]) if len(parts) == 4 else None
+        out[table] = (cursor, keys.split("|"), initial)
     return out
+
+
+def incremental_spec_for_transform(raw: str) -> str:
+    """The same list without initial values; the transform only needs cursor and keys."""
+    return ",".join(
+        ":".join(e.strip().split(":", 3)[:3]) for e in raw.split(",") if e.strip()
+    )
 
 
 def relax_constraints(table) -> None:
@@ -317,23 +351,30 @@ def build_source(pg_url: str):
     for table in TABLES:
         resource = source.resources[table]
         if table in incremental:
-            cursor, keys = incremental[table]
+            cursor, keys, initial = incremental[table]
+            # initial_value only matters on the first run; a stored cursor wins afterwards.
+            since = (
+                f", initial_value {initial} (first run only; a stored cursor wins)"
+                if initial is not None
+                else ""
+            )
             if INCREMENTAL_MODE == "append":
                 resource.apply_hints(
                     write_disposition="append",
-                    incremental=dlt.sources.incremental(cursor),
+                    incremental=dlt.sources.incremental(cursor, initial_value=initial),
                 )
                 flog(
                     "extract",
-                    f"{table}: append-only raw, cursor {cursor} (dedupe on {keys} downstream)",
+                    f"{table}: append-only raw, cursor {cursor}{since} "
+                    f"(dedupe on {keys} downstream)",
                 )
             else:
                 resource.apply_hints(
                     write_disposition="merge",
                     primary_key=keys if len(keys) > 1 else keys[0],
-                    incremental=dlt.sources.incremental(cursor),
+                    incremental=dlt.sources.incremental(cursor, initial_value=initial),
                 )
-                flog("extract", f"{table}: merge on {keys}, cursor {cursor}")
+                flog("extract", f"{table}: merge on {keys}, cursor {cursor}{since}")
         else:
             resource.apply_hints(write_disposition="replace")
             flog("extract", f"{table}: replace")
@@ -422,7 +463,7 @@ def trigger_transform() -> None:
     overrides = {
         "TARGET_DB": TARGET_DB,
         "RAW_SCHEMA": TARGET_SCHEMA,
-        "INCREMENTAL_TABLES": INCREMENTAL_TABLES
+        "INCREMENTAL_TABLES": incremental_spec_for_transform(INCREMENTAL_TABLES)
         if INCREMENTAL_MODE == "append"
         else "",
     }
