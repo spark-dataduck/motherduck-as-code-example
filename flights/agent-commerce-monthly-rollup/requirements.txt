@@ -1,1 +1,2 @@
-# duckdb is provided by the MotherDuck Flight runtime; no extra dependencies.
+# duckdb is provided by the MotherDuck Flight runtime.
+duckdb
