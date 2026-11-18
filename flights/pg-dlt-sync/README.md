@@ -194,10 +194,40 @@ Ingest (`config → probe → target → extract → normalize → load → trig
    Explainer state; `load` reports one instance per table with the rows written.
 4. Trigger the transform with the raw location and the incremental list.
 
+### How dlt runs the three stages
+
+Checked against dlt 1.21.0, the version `requirements.txt` pins.
+
+**One stage at a time, for all tables.** `extract` reads every table in `TABLES`, then
+`normalize` processes all of them, then `load` writes all of them. One run is one load package
+with one `_dlt_load_id`. Nothing reaches raw until every table is extracted and normalized, so
+one slow table delays the small ones. Split tables into groups (below) if that matters.
+
+| Stage | Parallelism | Files under `/tmp/dlt/pipelines/pg_dlt/` |
+|---|---|---|
+| extract | One thread, one Postgres query at a time. dlt can read tables in parallel with `.parallelize()` on the source; this Flight does not turn it on. | Every table's rows go to `normalize/extracted/<load_id>/`. Nothing is deleted during extract. |
+| normalize | Runs in this process unless `NORMALIZE__WORKERS` is set above 1. | Writes a second copy as load files. The extracted copy is deleted only after **all** tables are normalized. |
+| load | Up to 8 load jobs at once (dlt's limit for the MotherDuck destination). A job is one file, not one table. dlt does not split a table's rows into several files unless `file_max_items` or `file_max_bytes` is set, so in practice that is up to 8 tables loading at once. | The package moves to `load/loaded/` and its files are kept (`LOAD__DELETE_COMPLETED_JOBS` defaults to false). |
+
+**Temp disk.** Peak use is during normalize: the extracted copy and the normalized copy of
+everything read in the run, both on disk. With the default `sqlalchemy` backend normalize
+rewrites every file, so plan for about **twice** the size of the data read. `pyarrow` writes
+Parquet at extract, which normalize can move instead of rewrite. `LOAD__DELETE_COMPLETED_JOBS=true`
+frees disk after load but does not lower the peak. Nothing builds up across runs: `/tmp` goes
+away with the Flight's container, and the next run restores its cursors from MotherDuck
+(`sync_destination()`), not from local files.
+
+**Groups with different schedules.** Run one ingest and transform pair per group of tables,
+each pair on its own schedule. Give each group its own `TARGET_SCHEMA`: the transform rebuilds
+every table it finds in its raw schema, and dlt keeps each group's cursors in that schema.
+The groups can share `CURATED_SCHEMA`, since each transform writes only its own tables.
+
 Transform (`config → check → snapshot → merge → verify`):
 
-1. Discover raw tables; fail if an incremental table is not among them.
-2. Snapshot tables: `CREATE OR REPLACE TABLE curated.t AS SELECT * EXCLUDE (_dlt_id) FROM raw.t`.
+1. Discover raw tables; fail if an incremental table is not among them or has no
+   `_dlt_load_id`.
+2. Snapshot tables: `CREATE OR REPLACE TABLE curated.t AS SELECT * EXCLUDE (_dlt_id) FROM raw.t`
+   (`_dlt_id` is only excluded when raw has it; Arrow loads do not add it).
 3. Incremental tables: first run builds `curated.t` from a full dedupe of raw. Later runs take
    raw rows with `_dlt_load_id` newer than the max already in curated, dedupe them per key with
    `max_by(row, (cursor, _dlt_load_id))`, keep the versions newer than curated's (a NULL cursor in
@@ -211,7 +241,8 @@ Transform (`config → check → snapshot → merge → verify`):
 With no stored state, dlt reads **every row** of each table once and appends it to raw, then
 saves the max cursor. From the second run on, only rows at or after that value are read. For a
 large table, that first read has to fit the Flight's temp disk (20 GB on F4, 150 GB on F16,
-300 GB on F32) and the run-time limit. Bound it with the optional fourth field of
+300 GB on F32) at about twice its size (see [temp disk](#how-dlt-runs-the-three-stages)) and
+the run-time limit. Bound it with the optional fourth field of
 `INCREMENTAL_TABLES`, `table:cursor:key:initial_value`: rows with a cursor below that value are
 never read. On its own that leaves curated knowing only rows updated since then; to keep the
 older rows, seed curated first (next section).
