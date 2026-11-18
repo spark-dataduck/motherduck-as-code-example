@@ -120,10 +120,29 @@ def discover_tables(con) -> list[str]:
     return [r[0] for r in rows]
 
 
-def dedupe_sql(raw_rel: str, cursor: str, keys: list[str], where: str = "TRUE") -> str:
+def raw_dlt_columns(con, table: str) -> set[str]:
+    """The dlt columns a raw table has. Every row-based load has both; an Arrow load
+    (DLT_BACKEND=pyarrow) has _dlt_load_id only, because dlt skips _dlt_id for Arrow data."""
+    rows = con.execute(
+        "SELECT column_name FROM duckdb_columns() WHERE database_name = ? AND schema_name = ? "
+        "AND table_name = ? AND column_name IN ('_dlt_id', '_dlt_load_id')",
+        [TARGET_DB, RAW_SCHEMA, table],
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def exclude_sql(con, table: str) -> str:
+    """EXCLUDE clause for the bookkeeping columns this raw table actually has."""
+    drop = [c for c in BOOKKEEPING if c in raw_dlt_columns(con, table)]
+    return f" EXCLUDE ({', '.join(drop)})" if drop else ""
+
+
+def dedupe_sql(
+    raw_rel: str, cursor: str, keys: list[str], exclude: str, where: str = "TRUE"
+) -> str:
     """Latest row per key: newest cursor wins, newest load breaks ties."""
     return (
-        f"SELECT * EXCLUDE ({', '.join(BOOKKEEPING)}) FROM ("
+        f"SELECT *{exclude} FROM ("
         f"  SELECT unnest(max_by(r, (r.{q(cursor)}, r._dlt_load_id))) "
         f"  FROM {raw_rel} AS r WHERE {where} GROUP BY {', '.join(q(k) for k in keys)})"
     )
@@ -184,12 +203,23 @@ def main() -> int:
     fr("check", "running")
     tables = discover_tables(con)
     unknown = [t for t in incremental if t not in tables]
-    if not tables or unknown:
-        reason = (
-            f"no tables in {TARGET_DB}.{RAW_SCHEMA}"
-            if not tables
-            else f"INCREMENTAL_TABLES not in raw: {unknown}"
-        )
+    # The merge watermark is _dlt_load_id; without it there is no way to tell new raw rows
+    # from applied ones. Older ingests on DLT_BACKEND=pyarrow did not add it.
+    no_load_id = [
+        t
+        for t in incremental
+        if t in tables and "_dlt_load_id" not in raw_dlt_columns(con, t)
+    ]
+    if not tables or unknown or no_load_id:
+        if not tables:
+            reason = f"no tables in {TARGET_DB}.{RAW_SCHEMA}"
+        elif unknown:
+            reason = f"INCREMENTAL_TABLES not in raw: {unknown}"
+        else:
+            reason = (
+                f"raw tables without _dlt_load_id: {no_load_id}; "
+                "update the ingest Flight, drop these raw tables, and run it again"
+            )
         fr("check", "failed", error=reason)
         fr("snapshot", "skipped")
         fr("merge", "skipped")
@@ -207,7 +237,7 @@ def main() -> int:
         for t in snapshot_tables:
             con.execute(
                 f"CREATE OR REPLACE TABLE {db}.{cur}.{q(t)} AS "
-                f"SELECT * EXCLUDE ({', '.join(BOOKKEEPING)}) FROM {db}.{raw}.{q(t)}"
+                f"SELECT *{exclude_sql(con, t)} FROM {db}.{raw}.{q(t)}"
             )
             n = con.execute(f"SELECT count(*) FROM {db}.{cur}.{q(t)}").fetchone()[0]
             fr(
@@ -230,9 +260,10 @@ def main() -> int:
         for t in merge_tables:
             cursor, keys = incremental[t]
             raw_rel, cur_rel = f"{db}.{raw}.{q(t)}", f"{db}.{cur}.{q(t)}"
+            exclude = exclude_sql(con, t)
             if not table_exists(con, CURATED_SCHEMA, t):
                 con.execute(
-                    f"CREATE TABLE {cur_rel} AS {dedupe_sql(raw_rel, cursor, keys)}"
+                    f"CREATE TABLE {cur_rel} AS {dedupe_sql(raw_rel, cursor, keys, exclude)}"
                 )
                 n = con.execute(f"SELECT count(*) FROM {cur_rel}").fetchone()[0]
                 flog("merge", f"{t}: first run, built from full raw dedupe ({n} rows)")
@@ -249,7 +280,7 @@ def main() -> int:
                 f"SELECT coalesce(max(_dlt_load_id), '') FROM {cur_rel}"
             ).fetchone()[0]
             new_versions = dedupe_sql(
-                raw_rel, cursor, keys, where=f"r._dlt_load_id > {watermark!r}"
+                raw_rel, cursor, keys, exclude, where=f"r._dlt_load_id > {watermark!r}"
             )
             on = " AND ".join(f"s.{q(k)} = c.{q(k)}" for k in keys)
             # Inside DELETE ... USING the target is referenced by its bare table name

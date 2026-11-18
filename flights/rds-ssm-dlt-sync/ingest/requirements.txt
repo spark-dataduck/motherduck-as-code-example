@@ -1,5 +1,6 @@
 dlt[motherduck,sql_database]==1.21.0
 duckdb==1.5.6
+numpy==2.5.5
 psycopg2-binary==2.9.10
 sqlalchemy==2.0.43
 boto3==1.40.0

@@ -172,7 +172,7 @@ naming every bad value before any connection is made):
 | `INCREMENTAL_MODE` | `append` | `append`: append-only raw, history kept, dedupe downstream. `merge`: dlt upserts in place (delete+insert via a staging dataset); no transform needed, no history. |
 | `TARGET_DB`, `TARGET_SCHEMA` | `pg_sync`, `raw` | Landing database and dlt dataset |
 | `TRIGGER_FLIGHT_ID` | (none) | Transform Flight to start after a clean ingest |
-| `DLT_BACKEND` | `sqlalchemy` | `pyarrow` is faster on wide tables |
+| `DLT_BACKEND` | `sqlalchemy` | `sqlalchemy` or `pyarrow`; `pyarrow` is faster on wide tables |
 | `PROBE_TIMEOUT_S` | `90` | How long to retry the first connection (scale-to-zero wake-up) |
 
 **Transform.** Stored config is `CURATED_SCHEMA` plus `TARGET_DB`, `RAW_SCHEMA`,

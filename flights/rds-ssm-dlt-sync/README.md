@@ -254,7 +254,7 @@ naming every bad value before the tunnel opens):
 | `INCREMENTAL_MODE` | `merge` | `append`: append-only raw, history kept, dedupe downstream (recommended). `merge`: dlt upserts in place (delete+insert via a staging dataset); no transform needed, no history. |
 | `TARGET_DB`, `TARGET_SCHEMA` | `rds_sync`, `raw` | Landing database and dlt dataset |
 | `TRIGGER_FLIGHT_ID` | (none) | Transform Flight to start after a clean ingest |
-| `DLT_BACKEND` | `sqlalchemy` | `pyarrow` is faster on wide tables |
+| `DLT_BACKEND` | `sqlalchemy` | `sqlalchemy` or `pyarrow`; `pyarrow` is faster on wide tables |
 | `SKIP_TUNNEL` | `false` | `true` to run locally against a tunnel you opened yourself |
 | `SSM_PLUGIN_VERSION` | `1.2.896.0` | Pinned plugin build |
 

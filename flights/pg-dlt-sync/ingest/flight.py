@@ -109,7 +109,9 @@ PROBE_TIMEOUT_S = int(
 # MOTHERDUCK_TOKEN is injected by Flights.
 
 INCREMENTAL_MODES = {"merge", "append"}
-DLT_BACKENDS = {"sqlalchemy", "pyarrow", "pandas", "connectorx"}
+# pandas and connectorx are also dlt backends, but their packages are not in
+# requirements.txt, so they would fail at extract. Add the package first to use one.
+DLT_BACKENDS = {"sqlalchemy", "pyarrow"}
 
 
 def validate_config() -> None:
@@ -393,6 +395,9 @@ def ensure_target() -> None:
 def run_pipeline(pg_url: str) -> None:
     step("target", ensure_target)
     flog("target", f"md:{TARGET_DB} ready, dataset {TARGET_SCHEMA}")
+    # The transform's watermark is _dlt_load_id on every raw row. dlt adds it to row-based
+    # data (sqlalchemy backend) but not to Arrow data (pyarrow backend) unless asked to.
+    os.environ["NORMALIZE__PARQUET_NORMALIZER__ADD_DLT_LOAD_ID"] = "true"
     # MOTHERDUCK_TOKEN is read natively by the destination; only the database is set here.
     pipeline = dlt.pipeline(
         pipeline_name="pg_dlt",
